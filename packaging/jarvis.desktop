@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS
+GenericName=Linux AI Assistant
+Comment=Local-first Linux assistant with an audited tool system
+Exec=jarvis chat
+Icon=jarvis
+Terminal=true
+Categories=Utility;System;
+Keywords=ai;assistant;automation;system;
