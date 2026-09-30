@@ -43,13 +43,30 @@ that admits a limit.
 
 ## Install
 
+The implementation lives on the `kali-ops-implementation` branch.
+
 ```bash
-git clone <this repo>
+git clone --branch kali-ops-implementation \
+  https://github.com/logvex-sg/AI-model.git
 cd AI-model
-python3 -m pip install -e .        # optional: installs the `kali-ops` entry point
 ```
 
-Or run it straight from the source tree with `python3 -m kali_ops`.
+You can run it immediately from the source tree with `python3 -m kali_ops` — no
+install required.
+
+To get the `kali-ops` command instead:
+
+```bash
+python3 -m pip install -e .
+kali-ops doctor
+```
+
+If you see `kali-ops: command not found` after installing, pip put the script in
+`~/.local/bin`, which is often not on `PATH`. Fix it with:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 Python 3.9+ is required. The GUI additionally needs the system Tk libraries:
 
