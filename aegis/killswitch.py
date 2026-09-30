@@ -2,8 +2,8 @@
 
 The killswitch is the operator's hard stop. It engages when **either**:
 
-* the environment variable ``KALI_OPS_KILLSWITCH`` is truthy, or
-* a sentinel file exists (default ``$KALI_OPS_HOME/KILLSWITCH``).
+* the environment variable ``KALI_AEGIS_KILLSWITCH`` is truthy, or
+* a sentinel file exists (default ``$KALI_AEGIS_HOME/KILLSWITCH``).
 
 Engaging it refuses new work, and callers are expected to abandon queued and
 running work. Disengaging is always explicit — nothing auto-restarts.
@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .errors import KillswitchActive
+from .errors import AegisHaltedError
 
-ENV_VAR = "KALI_OPS_KILLSWITCH"
+ENV_VAR = "KALI_AEGIS_KILLSWITCH"
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 
 
@@ -69,8 +69,8 @@ class Killswitch:
         return False
 
     def guard(self, action: str = "operation") -> None:
-        """Raise :class:`KillswitchActive` if the switch is engaged."""
+        """Raise :class:`AegisHaltedError` if the switch is engaged."""
         if self.is_engaged():
-            raise KillswitchActive(
+            raise AegisHaltedError(
                 f"killswitch engaged ({self.reason()}); refusing {action}"
             )

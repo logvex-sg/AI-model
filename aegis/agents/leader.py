@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..state import SubTask, Task, TaskStatus
-from .base import Agent, AgentResult
+from .base import Agent, AgentResult, AgentState
 
 
 @dataclass
@@ -96,25 +96,39 @@ class LeaderAgent(Agent):
 
     def plan(self, objective: str, scope: str = "") -> List[PlanStep]:
         """Decompose an objective into ordered :class:`PlanStep`s."""
-        lowered = objective.lower()
-        steps: List[PlanStep] = []
-        for keywords, template in _TEMPLATES:
-            if any(k in lowered for k in keywords):
-                steps.extend(template)
-        if not steps:
-            steps = list(_DEFAULT_STEPS)
-        return steps
+        self.enter(AgentState.THINKING, task=objective, tool="plan")
+        try:
+            lowered = objective.lower()
+            steps: List[PlanStep] = []
+            for keywords, template in _TEMPLATES:
+                if any(k in lowered for k in keywords):
+                    steps.extend(template)
+            if not steps:
+                steps = list(_DEFAULT_STEPS)
+            return steps
+        finally:
+            self.leave()
 
     def decompose(self, task: Task) -> AgentResult:
         """Attach a plan (as subtasks) to *task* and return the plan."""
 
         def _run() -> tuple:
+            self.enter(AgentState.PLANNING, task=task.objective, tool="decompose")
             steps = self.plan(task.objective, task.scope)
             for step in steps:
                 task.subtasks.append(
                     SubTask.new(step.description, step.agent, risk=step.risk)
                 )
             self._record("plan", task, f"{len(steps)} subtasks")
+            # Tell each agent what it has been assigned, in the structured
+            # message form the operating model specifies.
+            for step in steps:
+                if step.agent != self.name:
+                    self.send(
+                        step.agent,
+                        "assignment",
+                        payload={"description": step.description, "risk": step.risk, "task": task.id},
+                    )
             data = {
                 "steps": [
                     {"description": s.description, "agent": s.agent, "risk": s.risk}
@@ -129,6 +143,7 @@ class LeaderAgent(Agent):
         """Check that every subtask produced a successful result."""
 
         def _run() -> tuple:
+            self.enter(AgentState.THINKING, task=task.objective, tool="verify")
             failed = [r for r in results if not r.ok]
             errors = [e for r in failed for e in r.errors]
             ok = not failed
@@ -138,6 +153,17 @@ class LeaderAgent(Agent):
                 else f"{len(failed)} of {len(results)} subtasks failed"
             )
             self._record("verify", task, summary)
+            if failed:
+                # The leader does not silently accept a bad result: it reports
+                # the failure and a recommended action back up the chain.
+                self.send(
+                    "operator",
+                    "verification",
+                    status="failed",
+                    error=summary,
+                    recommended_action="review failed subtasks before proceeding",
+                    payload={"failed": [r.action for r in failed]},
+                )
             return summary, {"failed": [r.action for r in failed], "errors": errors}
 
         return self._timed("verify", _run)

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from kali_ops.errors import ScopeViolation
-from kali_ops.security.recon import COMMON_PORTS, Recon
-from kali_ops.security.scope import Scope, is_local_host, local_addresses
+from aegis.errors import ScopeViolation
+from aegis.security.recon import COMMON_PORTS, Recon
+from aegis.security.scope import Scope, is_local_host, local_addresses
 
 
 class ScopeTests(unittest.TestCase):

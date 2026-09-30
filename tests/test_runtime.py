@@ -6,10 +6,10 @@ import os
 import unittest
 from pathlib import Path
 
-from kali_ops.config import Config, load_config
-from kali_ops.errors import ConfigError, KillswitchActive
-from kali_ops.killswitch import ENV_VAR, Killswitch
-from kali_ops.state import StateStore, TaskStatus
+from aegis.config import Config, load_config
+from aegis.errors import ConfigError, AegisHaltedError
+from aegis.killswitch import ENV_VAR, Killswitch
+from aegis.state import StateStore, TaskStatus
 
 from . import RuntimeTestCase
 
@@ -29,12 +29,12 @@ class ConfigTests(unittest.TestCase):
             Config(home=Path("/tmp/x"), api_port=99999)
 
     def test_env_override_applies(self) -> None:
-        os.environ["KALI_OPS_API_PORT"] = "9999"
+        os.environ["KALI_AEGIS_API_PORT"] = "9999"
         try:
             cfg = load_config()
             self.assertEqual(cfg.api_port, 9999)
         finally:
-            del os.environ["KALI_OPS_API_PORT"]
+            del os.environ["KALI_AEGIS_API_PORT"]
 
     def test_unknown_override_rejected(self) -> None:
         with self.assertRaises(ConfigError):
@@ -65,7 +65,7 @@ class KillswitchTests(RuntimeTestCase):
 
     def test_guard_raises_when_engaged(self) -> None:
         self.killswitch.engage()
-        with self.assertRaises(KillswitchActive):
+        with self.assertRaises(AegisHaltedError):
             self.killswitch.guard("test")
 
 

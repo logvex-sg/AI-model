@@ -2,7 +2,7 @@
 
 The orchestrator owns the shared handles (config, killswitch, log, state) and
 drives the leader → worker → verify loop. It is what the CLI, the API, and the
-desktop app all talk to.
+desktop console all talk to.
 """
 
 from __future__ import annotations
@@ -13,10 +13,12 @@ from typing import Any, Dict, List, Optional
 from .agents import BuilderAgent, ExecutorAgent, LeaderAgent, PentesterAgent
 from .agents.base import Agent, AgentResult
 from .config import Config
-from .errors import KillswitchActive
+from .diagnostics import DiagnosticsReport, run_diagnostics
+from .errors import AegisHaltedError
 from .filesystem import FileSystem
 from .killswitch import Killswitch
 from .logging import OperationLog
+from .recovery import RecoveryEngine
 from .shell import Shell
 from .state import StateStore, Task, TaskStatus
 
@@ -32,6 +34,7 @@ class Runtime:
     shell: Shell
     fs: FileSystem
     agents: Dict[str, Agent] = field(default_factory=dict)
+    recovery: Optional[RecoveryEngine] = None
 
     @classmethod
     def build(cls, config: Config, *, dry_run: bool = False) -> "Runtime":
@@ -41,6 +44,13 @@ class Runtime:
         state = StateStore(config)
         shell = Shell(config, killswitch, log, agent="executor", dry_run=dry_run)
         fs = FileSystem(config, killswitch, log, agent="builder")
+        recovery = RecoveryEngine(
+            killswitch,
+            log,
+            max_attempts=config.max_retries,
+            backoff_s=config.retry_backoff_s,
+            agent="leader",
+        )
 
         agents: Dict[str, Agent] = {
             "leader": LeaderAgent(config, killswitch, log=log),
@@ -56,6 +66,7 @@ class Runtime:
             shell=shell,
             fs=fs,
             agents=agents,
+            recovery=recovery,
         )
 
     # -- convenience accessors ----------------------------------------------
@@ -90,6 +101,35 @@ class Runtime:
             "dry_run": self.shell.dry_run,
         }
 
+    def diagnostics(self) -> DiagnosticsReport:
+        """Run the startup health assessment."""
+        return run_diagnostics(self.config)
+
+    # -- observability -------------------------------------------------------
+    def monitor(self) -> Dict[str, Any]:
+        """Per-agent live state for the monitor and the desktop agent bar."""
+        return {
+            "agents": [
+                {
+                    "name": a.name,
+                    "role": a.role,
+                    **a.runtime.to_dict(),
+                }
+                for a in self.agents.values()
+            ],
+            "queue": [t.id for t in self.state.queue()],
+            "queue_length": len(self.state.queue()),
+            "interrupted": [t.id for t in self.state.interrupted()],
+            "killswitch": self.killswitch.is_engaged(),
+        }
+
+    def messages(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Structured inter-agent messages emitted this session."""
+        out: List[Dict[str, Any]] = []
+        for agent in self.agents.values():
+            out.extend(m.to_dict() for m in agent.outbox)
+        return out[-limit:]
+
     # -- workflows -----------------------------------------------------------
     def plan(self, objective: str, scope: str = "") -> Dict[str, Any]:
         """Create a task and decompose it, without executing anything."""
@@ -107,8 +147,21 @@ class Runtime:
         cleanly if the killswitch engages, marking the task INTERRUPTED.
         """
         task = self.state.create(objective, scope)
+        return self._execute_task(task, scope)
+
+    def resume_task(self, task_id: str) -> Dict[str, Any]:
+        """Re-run an INTERRUPTED task from its existing plan."""
+        task = self.state.get(task_id)
+        for sub in task.subtasks:
+            if sub.status in {"RUNNING", "BLOCKED"}:
+                sub.status = TaskStatus.PENDING.value
+                sub.result = ""
+        self.state.save()
+        return self._execute_task(task, task.scope)
+
+    def _execute_task(self, task: Task, scope: str) -> Dict[str, Any]:
         self.state.update_status(task.id, TaskStatus.RUNNING)
-        plan = self.leader.decompose(task)
+        plan = self.leader.decompose(task) if not task.subtasks else self._existing_plan(task)
 
         results: List[AgentResult] = []
         blocked: List[str] = []
@@ -128,7 +181,7 @@ class Runtime:
                     sub_status = "BLOCKED"
                     blocked.append(outcome.summary)
                 self.state.complete_subtask(task.id, sub.id, outcome.summary, status=sub_status)
-        except KillswitchActive:
+        except AegisHaltedError:
             interrupted = True
             self.state.update_status(task.id, TaskStatus.INTERRUPTED)
 
@@ -151,6 +204,20 @@ class Runtime:
 
         self.state.set_report(task.id, report)
         return report
+
+    def _existing_plan(self, task: Task) -> AgentResult:
+        return AgentResult(
+            agent="leader",
+            action="plan",
+            ok=True,
+            summary=f"resumed existing plan of {len(task.subtasks)} subtasks",
+            data={
+                "steps": [
+                    {"description": s.description, "agent": s.agent, "risk": s.risk}
+                    for s in task.subtasks
+                ]
+            },
+        )
 
     def _dispatch(self, agent: Agent, sub, scope: str) -> AgentResult:
         """Route a subtask to a concrete, executable action.
@@ -181,6 +248,16 @@ class Runtime:
         verification: str,
         blocked: List[str],
     ) -> Dict[str, Any]:
+        commands = [
+            r.data["command"]
+            for r in results
+            if isinstance(r.data, dict) and r.data.get("command")
+        ]
+        files = [
+            r.data.get("path")
+            for r in results
+            if isinstance(r.data, dict) and r.data.get("path")
+        ]
         return {
             "OBJECTIVE": task.objective,
             "SCOPE": task.scope or "(unspecified)",
@@ -190,8 +267,8 @@ class Runtime:
             "RESULTS": [r.summary for r in results],
             "ERRORS": [e for r in results for e in r.errors],
             "VERIFICATION": verification,
-            "FILES CHANGED": [],
-            "COMMANDS EXECUTED": [],
+            "FILES CHANGED": [f for f in files if f],
+            "COMMANDS EXECUTED": commands,
             "NEXT ACTION": self._next_action(status, blocked),
             "STATUS": status.value,
             "task_id": task.id,
@@ -202,7 +279,7 @@ class Runtime:
         if status is TaskStatus.COMPLETE:
             return "none"
         if status is TaskStatus.INTERRUPTED:
-            return "release the killswitch and re-run"
+            return "release the killswitch and resume the task"
         if status is TaskStatus.BLOCKED:
             return "supply explicit commands or configure an LLM for the blocked steps"
         return "review failures"

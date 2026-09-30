@@ -41,6 +41,8 @@ class OperationLog:
         result: str = "",
         exit_code: Optional[int] = None,
         status: str = "ok",
+        cwd: str = "",
+        duration_ms: Optional[int] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Append one operation record and return it."""
@@ -51,12 +53,15 @@ class OperationLog:
             "operation": operation,
             "target": target,
             "command": redact(command),
+            "cwd": cwd,
             "result": redact(result),
             "exit_code": exit_code,
+            "duration_ms": duration_ms,
             "status": status,
         }
         if extra:
-            entry["extra"] = redact(json.dumps(extra, default=str))
+            for key, value in extra.items():
+                entry.setdefault(key, redact(str(value)))
         return self._write(entry)
 
     def read(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:

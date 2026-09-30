@@ -1,6 +1,6 @@
 """Persistent task and project state.
 
-State is a single JSON document under ``$KALI_OPS_HOME/state.json``. It holds
+State is a single JSON document under ``$KALI_AEGIS_HOME/state.json``. It holds
 tasks, their subtask breakdown, assigned agent, and status. Writes are atomic
 (write-temp-then-rename) so an interrupted run cannot corrupt the file.
 """
@@ -66,13 +66,30 @@ class Task:
         self.updated_at = time.time()
 
 
+@dataclass
+class Project:
+    """A workspace the platform has scaffolded or been pointed at."""
+
+    id: str
+    path: str
+    kind: str = "unknown"
+    created_at: float = field(default_factory=time.time)
+    last_build: str = ""
+    last_test: str = ""
+
+    @staticmethod
+    def new(path: str, kind: str = "unknown") -> "Project":
+        return Project(id=uuid.uuid4().hex[:8], path=path, kind=kind)
+
+
 class StateStore:
-    """Loads, mutates, and persists task state."""
+    """Loads, mutates, and persists task and project state."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.path = config.state_path
         self._tasks: Dict[str, Task] = {}
+        self._projects: Dict[str, Project] = {}
         self._load()
 
     def _load(self) -> None:
@@ -83,13 +100,21 @@ class StateStore:
         except (OSError, json.JSONDecodeError):
             return
         for raw in data.get("tasks", []):
+            raw = dict(raw)
             subtasks = [SubTask(**s) for s in raw.pop("subtasks", [])]
             task = Task(**raw, subtasks=subtasks)
             self._tasks[task.id] = task
+        for raw in data.get("projects", []):
+            project = Project(**raw)
+            self._projects[project.id] = project
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1, "tasks": [asdict(t) for t in self._tasks.values()]}
+        payload = {
+            "version": 2,
+            "tasks": [asdict(t) for t in self._tasks.values()],
+            "projects": [asdict(p) for p in self._projects.values()],
+        }
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -108,6 +133,24 @@ class StateStore:
 
     def all(self) -> List[Task]:
         return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+
+    def by_status(self, status: TaskStatus) -> List[Task]:
+        return [t for t in self.all() if t.status == status.value]
+
+    def queue(self) -> List[Task]:
+        """Tasks not yet finished, oldest first."""
+        pending = {TaskStatus.PENDING.value, TaskStatus.RUNNING.value}
+        return sorted(
+            (t for t in self._tasks.values() if t.status in pending),
+            key=lambda t: t.created_at,
+        )
+
+    def failed(self) -> List[Task]:
+        return self.by_status(TaskStatus.FAILED)
+
+    def interrupted(self) -> List[Task]:
+        """Tasks a killswitch or crash left unfinished, safe to resume."""
+        return self.by_status(TaskStatus.INTERRUPTED)
 
     def update_status(self, task_id: str, status: TaskStatus) -> Task:
         task = self.get(task_id)
@@ -140,3 +183,33 @@ class StateStore:
         task.touch()
         self.save()
         return task
+
+    # -- projects ------------------------------------------------------------
+    def add_project(self, path: str, kind: str = "unknown") -> Project:
+        existing = next((p for p in self._projects.values() if p.path == path), None)
+        if existing is not None:
+            existing.kind = kind
+            self.save()
+            return existing
+        project = Project.new(path, kind)
+        self._projects[project.id] = project
+        self.save()
+        return project
+
+    def get_project(self, project_id: str) -> Project:
+        if project_id not in self._projects:
+            raise NotFoundError(f"no such project: {project_id}")
+        return self._projects[project_id]
+
+    def projects(self) -> List[Project]:
+        return sorted(self._projects.values(), key=lambda p: p.created_at, reverse=True)
+
+    def record_build(self, path: str, summary: str) -> None:
+        project = self.add_project(path)
+        project.last_build = summary
+        self.save()
+
+    def record_test(self, path: str, summary: str) -> None:
+        project = self.add_project(path)
+        project.last_test = summary
+        self.save()

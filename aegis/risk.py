@@ -69,15 +69,29 @@ _OFFENSIVE_TOOLS = {
     "burpsuite", "zap", "wpscan", "nuclei", "amass", "theHarvester",
 }
 
+# Commands whose effects cannot be undone by re-running something else.
+_IRREVERSIBLE = {
+    "rm", "rmdir", "mkfs", "fdisk", "parted", "dd", "wipefs", "shred",
+    "userdel", "groupdel", "grub-install", "update-grub", "poweroff", "halt",
+}
+
 
 @dataclass(frozen=True)
 class RiskAssessment:
-    """The verdict for one operation."""
+    """The verdict for one operation.
+
+    Carries the pre-execution facts section 20 requires the executor to
+    determine: how risky it is, what it will affect, whether it is reversible,
+    and whether it needs elevated privileges.
+    """
 
     risk: Risk
     reason: str
     command: str
     needs_confirmation: bool
+    category: str = "unknown"
+    reversible: bool = True
+    requires_root: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -85,7 +99,18 @@ class RiskAssessment:
             "reason": self.reason,
             "command": self.command,
             "needs_confirmation": self.needs_confirmation,
+            "category": self.category,
+            "reversible": self.reversible,
+            "requires_root": self.requires_root,
         }
+
+
+#: Commands that only ever affect a single process, never the host.
+_CATEGORY_BY_RISK = {
+    Risk.LOW: "diagnostic",
+    Risk.MEDIUM: "system-change",
+    Risk.HIGH: "destructive",
+}
 
 
 def _first_word(command: str) -> str:
@@ -112,37 +137,63 @@ def classify(command: str, *, base: Optional[Risk] = None) -> RiskAssessment:
     """Classify a shell command string."""
     tool = _first_word(command)
     lowered = command.lower()
+    needs_root = "sudo" in lowered.split() or lowered.startswith("sudo ")
+    irreversible = tool in _IRREVERSIBLE
+
+    def verdict(
+        risk: Risk,
+        reason: str,
+        *,
+        needs_confirmation: bool,
+        category: Optional[str] = None,
+    ) -> RiskAssessment:
+        return RiskAssessment(
+            risk=risk,
+            reason=reason,
+            command=command,
+            needs_confirmation=needs_confirmation,
+            category=category or _CATEGORY_BY_RISK.get(risk, "unknown"),
+            reversible=not (tool in _IRREVERSIBLE),
+            requires_root=needs_root,
+        )
 
     for marker in _HIGH_MARKERS:
         if marker in lowered:
-            return RiskAssessment(
-                Risk.HIGH, f"destructive pattern detected: {marker!r}", command, True
+            return verdict(
+                Risk.HIGH,
+                f"destructive pattern detected: {marker!r}",
+                needs_confirmation=True,
+                category="destructive",
             )
 
     if tool in _OFFENSIVE_TOOLS:
-        return RiskAssessment(
+        return verdict(
             Risk.HIGH,
             f"{tool} is an offensive security tool and requires an authorized scope",
-            command,
-            True,
+            needs_confirmation=True,
+            category="offensive",
         )
 
     if tool in _HIGH_COMMANDS:
-        return RiskAssessment(Risk.HIGH, f"{tool} can destroy data or break the host", command, True)
+        return verdict(
+            Risk.HIGH,
+            f"{tool} can destroy data or break the host"
+            + (" and cannot be undone" if irreversible else ""),
+            needs_confirmation=True,
+        )
 
     if tool in _MEDIUM_COMMANDS:
-        return RiskAssessment(Risk.MEDIUM, f"{tool} changes system state", command, False)
+        return verdict(Risk.MEDIUM, f"{tool} changes system state", needs_confirmation=False)
 
     if tool in _LOW_COMMANDS:
         risk = base or Risk.LOW
-        return RiskAssessment(risk, f"{tool} is a read-only or build command", command, False)
+        return verdict(risk, f"{tool} is a read-only or build command", needs_confirmation=False)
 
     risk = base or Risk.MEDIUM
-    return RiskAssessment(
+    return verdict(
         risk,
         f"{tool or 'command'} is unrecognised; treated as {risk.name} by default",
-        command,
-        risk is Risk.HIGH,
+        needs_confirmation=risk is Risk.HIGH,
     )
 
 

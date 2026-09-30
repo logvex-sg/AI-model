@@ -1,6 +1,6 @@
 """Shared test fixtures.
 
-Tests run against a throwaway ``$KALI_OPS_HOME`` under a temporary directory so
+Tests run against a throwaway ``$KALI_AEGIS_HOME`` under a temporary directory so
 they never touch the operator's real state, log, or killswitch sentinel.
 """
 
@@ -11,10 +11,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kali_ops.config import Config
-from kali_ops.killswitch import Killswitch
-from kali_ops.logging import OperationLog
-from kali_ops.orchestrator import Runtime
+from aegis.config import Config
+from aegis.killswitch import Killswitch
+from aegis.logging import OperationLog
+from aegis.orchestrator import Runtime
 
 
 class RuntimeTestCase(unittest.TestCase):
@@ -27,11 +27,11 @@ class RuntimeTestCase(unittest.TestCase):
         self.config.ensure_home()
         self.killswitch = Killswitch(self.config)
         self.log = OperationLog(self.config.log_path)
-        self._env_backup = os.environ.pop("KALI_OPS_KILLSWITCH", None)
+        self._env_backup = os.environ.pop("KALI_AEGIS_KILLSWITCH", None)
 
     def tearDown(self) -> None:
         if self._env_backup is not None:
-            os.environ["KALI_OPS_KILLSWITCH"] = self._env_backup
+            os.environ["KALI_AEGIS_KILLSWITCH"] = self._env_backup
         self._tmp.cleanup()
 
     def build_runtime(self, **overrides) -> Runtime:

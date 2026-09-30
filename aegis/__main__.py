@@ -1,4 +1,4 @@
-"""Allow ``python -m kali_ops``."""
+"""Allow ``python -m aegis``."""
 
 from .cli import main
 

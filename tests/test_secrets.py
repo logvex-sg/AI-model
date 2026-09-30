@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from kali_ops.secrets import REDACTED, contains_secret, find_secrets, redact
+from aegis.secrets import REDACTED, contains_secret, find_secrets, redact
 
 
 class RedactionTests(unittest.TestCase):

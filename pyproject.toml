@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kali-ops"
-version = "0.1.0"
-description = "KALI-OPS — autonomous cybersecurity engineering assistant (leader/builder/pentester/executor) for authorized systems."
+name = "aegis"
+version = "0.2.0"
+description = "KALI-AEGIS — autonomous security and software engineering platform (leader/builder/pentester/executor) for authorized systems."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "KALI-OPS" }]
+authors = [{ name = "KALI-AEGIS" }]
 keywords = ["security", "automation", "agents", "pentest", "devops"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -22,13 +22,13 @@ dependencies = []
 dev = ["pytest>=7"]
 
 [project.scripts]
-kali-ops = "kali_ops.cli:main"
+aegis = "aegis.cli:main"
 
 [tool.setuptools]
 packages = [
-    "kali_ops",
-    "kali_ops.agents",
-    "kali_ops.security",
+    "aegis",
+    "aegis.agents",
+    "aegis.security",
 ]
 
 [tool.pytest.ini_options]

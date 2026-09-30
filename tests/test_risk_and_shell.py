@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from kali_ops.risk import Risk, classify
-from kali_ops.shell import Shell
+from aegis.risk import Risk, classify
+from aegis.shell import Shell
 
 from . import RuntimeTestCase
 
@@ -47,7 +47,7 @@ class ShellPolicyTests(RuntimeTestCase):
 
     def test_high_risk_command_denied(self) -> None:
         shell = Shell(self.config, self.killswitch, self.log)
-        from kali_ops.errors import RiskDenied
+        from aegis.errors import RiskDenied
 
         with self.assertRaises(RiskDenied):
             shell.run("rm -rf /")
@@ -66,14 +66,14 @@ class ShellPolicyTests(RuntimeTestCase):
     def test_killswitch_blocks_execution(self) -> None:
         shell = Shell(self.config, self.killswitch, self.log)
         self.killswitch.engage()
-        from kali_ops.errors import KillswitchActive
+        from aegis.errors import AegisHaltedError
 
-        with self.assertRaises(KillswitchActive):
+        with self.assertRaises(AegisHaltedError):
             shell.run("echo nope")
 
     def test_failure_raises_when_check_requested(self) -> None:
         shell = Shell(self.config, self.killswitch, self.log)
-        from kali_ops.errors import CommandError
+        from aegis.errors import CommandError
 
         with self.assertRaises(CommandError):
             shell.run("exit 3", check=True)

@@ -19,8 +19,8 @@ env/
 .coverage
 htmlcov/
 
-# KALI-OPS runtime state (never commit operational data)
-.kali-ops/
+# KALI-AEGIS runtime state (never commit operational data)
+.aegis/
 operations.jsonl
 state.json
 KILLSWITCH

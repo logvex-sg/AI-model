@@ -3,8 +3,8 @@
 Precedence (highest wins):
 
 1. Explicit overrides passed to :func:`load_config`
-2. Environment variables (``KALI_OPS_*``)
-3. Config file (``$KALI_OPS_HOME/config.toml`` or ``--config`` path)
+2. Environment variables (``KALI_AEGIS_*``)
+3. Config file (``$KALI_AEGIS_HOME/config.toml`` or ``--config`` path)
 4. Built-in defaults
 
 The config file is optional. When it is absent the defaults plus environment
@@ -25,8 +25,8 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - 3.9/3.10 fallback
     _toml = None  # type: ignore[assignment]
 
-DEFAULT_HOME = Path(os.environ.get("KALI_OPS_HOME", Path.home() / ".kali-ops"))
-ENV_PREFIX = "KALI_OPS_"
+DEFAULT_HOME = Path(os.environ.get("KALI_AEGIS_HOME", Path.home() / ".aegis"))
+ENV_PREFIX = "KALI_AEGIS_"
 
 #: Environment variables that flip a boolean config field on.
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
@@ -60,6 +60,12 @@ class Config:
     allowed_write_paths: List[str] = field(default_factory=list)
     #: Deny-by-default for HIGH risk operations without operator confirmation.
     auto_approve_high_risk: bool = False
+    #: Maximum attempts for a single recoverable operation (section 17).
+    max_retries: int = 1
+    #: Base delay between retries; doubles each attempt.
+    retry_backoff_s: float = 1.0
+    #: Directory where scaffolded projects are created.
+    projects_dir: str = "projects"
 
     def __post_init__(self) -> None:
         self.home = Path(self.home).expanduser()
@@ -69,6 +75,8 @@ class Config:
             raise ConfigError(f"invalid api_port: {self.api_port!r}")
         if int(self.command_timeout) < 1:
             raise ConfigError("command_timeout must be >= 1 second")
+        if int(self.max_retries) < 1:
+            raise ConfigError("max_retries must be >= 1")
 
     # -- paths ---------------------------------------------------------------
     @property
@@ -87,9 +95,13 @@ class Config:
         p = Path(name)
         return p if p.is_absolute() else self.home / p
 
+    @property
+    def projects_path(self) -> Path:
+        return self._resolve(self.projects_dir)
+
     def write_roots(self) -> List[Path]:
         """Directories considered writable by the agent."""
-        roots = [self.home]
+        roots = [self.home, self.projects_path]
         roots.extend(Path(p).expanduser() for p in self.allowed_write_paths)
         return roots
 
@@ -112,6 +124,11 @@ def _coerce(field_type: Any, raw: str) -> Any:
             return int(raw)
         except ValueError as exc:
             raise ConfigError(f"expected integer, got {raw!r}") from exc
+    if field_type is float:
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ConfigError(f"expected number, got {raw!r}") from exc
     if field_type is list:
         return [item.strip() for item in raw.split(",") if item.strip()]
     return raw

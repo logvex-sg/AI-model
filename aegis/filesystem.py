@@ -1,6 +1,6 @@
 """Sandboxed filesystem operations.
 
-Write operations are confined to the configured write roots (``$KALI_OPS_HOME``
+Write operations are confined to the configured write roots (``$KALI_AEGIS_HOME``
 plus any ``allowed_write_paths``). Reads are unrestricted but their contents
 are redacted before being returned.
 """
