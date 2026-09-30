@@ -51,18 +51,43 @@ git clone --branch kali-ops-implementation \
 cd AI-model
 ```
 
-You can run it immediately from the source tree with `python3 -m kali_ops` — no
-install required.
+### Just run it (recommended)
 
-To get the `kali-ops` command instead:
+No install required at all:
 
 ```bash
-python3 -m pip install -e .
+python3 -m kali_ops doctor
+```
+
+Every command below works with `python3 -m kali_ops <command>`.
+
+### Install the `kali-ops` command
+
+Kali and Debian block system-wide `pip install` with
+[PEP 668](https://peps.python.org/pep-0668/) (`error: externally-managed-environment`).
+Use one of these instead.
+
+**pipx** (cleanest — isolated, puts the command on your PATH):
+
+```bash
+sudo apt-get install -y pipx
+pipx install .
 kali-ops doctor
 ```
 
-If you see `kali-ops: command not found` after installing, pip put the script in
-`~/.local/bin`, which is often not on `PATH`. Fix it with:
+**Virtual environment** (if you want a normal editable install):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/kali-ops doctor
+```
+
+**Not recommended:** `pip install -e . --break-system-packages`. It can corrupt
+your system Python. The two options above are strictly better.
+
+If you installed with `pip --user` and get `kali-ops: command not found`, the
+script landed in `~/.local/bin`, which is often not on `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
