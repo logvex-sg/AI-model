@@ -43,6 +43,23 @@ imports and fail without the correct top-level directory.
   dictionaries.
 - **Exit codes are typed.** Raise an `AegisError` subclass so a policy denial is
   distinguishable from a genuine failure.
+- **Tkinter is single-threaded.** Work runs on a worker thread but must never
+  touch a widget from it — push onto `GlassApp._results` and let `_tick()`
+  drain it. Calling `after()` off the main thread raises
+  `main thread is not in main loop`.
+- **Views are rebuilt, not persistent.** `_render_view()` destroys the content
+  frame, so grab widgets you need to read later via a tracked attribute (see
+  `GlassApp._entry`) and check `winfo_exists()` before using them.
+
+## Testing
+
+```bash
+python3 -m unittest discover -s tests -t .          # 79 tests
+xvfb-run -a python3 -m unittest discover -s tests -t .   # includes GUI tests
+```
+
+The GUI tests skip cleanly when Tk or a display is missing, so the suite runs
+on a headless builder.
 
 ## Safety
 
