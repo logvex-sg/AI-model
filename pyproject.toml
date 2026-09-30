@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kali-ops"
+version = "0.1.0"
+description = "KALI-OPS — autonomous cybersecurity engineering assistant (leader/builder/pentester/executor) for authorized systems."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "KALI-OPS" }]
+keywords = ["security", "automation", "agents", "pentest", "devops"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+kali-ops = "kali_ops.cli:main"
+
+[tool.setuptools]
+packages = [
+    "kali_ops",
+    "kali_ops.agents",
+    "kali_ops.security",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
