@@ -129,6 +129,27 @@ killswitch is marked `INTERRUPTED` and can be resumed with `resume-task`.
 Every policy lives in exactly one place. Adding a new agent or interface does
 not bypass them because they all share the same core services.
 
+## Desktop console
+
+`gui.py` is a conversation-first surface built on plain Tkinter — no theme
+engine, no third-party widgets. The frosted-glass look is composited by hand:
+`_blend()` fakes translucency by mixing an accent into a base colour, cards get
+a hairline border plus a 1px lit top bevel, and the hero is a per-row gradient
+drawn on a canvas.
+
+Two details matter for correctness rather than looks:
+
+- **Threading.** The objective runs on a worker thread, which never touches a
+  widget. It pushes the result onto a `queue.Queue`; the main loop drains that
+  queue in `_tick()` and only then updates the UI. Calling `after()` from the
+  worker would raise `main thread is not in main loop`.
+- **Rebuild-on-view.** Switching views destroys and recreates the content
+  frame, so the composer's entry widget is recreated too. `_submit()` reads the
+  live widget through `_entry` and checks `winfo_exists()` before use.
+
+The right-hand agent rail reads `Runtime.monitor()` on every tick, so the states
+shown are the agents' real runtime state, not a decorative animation.
+
 ## Persistence
 
 - `operations.jsonl` — append-only audit log, one JSON object per action, with
