@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# KALI-AEGIS runtime state (never commit operational data)
+.aegis/
+operations.jsonl
+state.json
+KILLSWITCH
+
+# Editors
+.idea/
+.vscode/
+*.swp

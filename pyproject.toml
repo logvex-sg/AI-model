@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis"
+version = "0.2.0"
+description = "KALI-AEGIS — autonomous security and software engineering platform (leader/builder/pentester/executor) for authorized systems."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "KALI-AEGIS" }]
+keywords = ["security", "automation", "agents", "pentest", "devops"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+aegis = "aegis.cli:main"
+
+[tool.setuptools]
+packages = [
+    "aegis",
+    "aegis.agents",
+    "aegis.security",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
