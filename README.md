@@ -28,7 +28,7 @@ This is a working framework, not a proof of concept. What is implemented today:
 | Scoped reconnaissance | Implemented | TCP connect scan + banner grab, scope-enforced |
 | Diagnostics table | Implemented | `aegis doctor` reports each component as OK / WARN / MISSING |
 | REST API | Implemented | Stdlib `http.server`, loopback by default |
-| Desktop console | Implemented | Tkinter; sidebar workspaces, agent bar, killswitch |
+| Desktop console | Implemented | Tkinter glass UI; thread composer, live agent rail, killswitch |
 | Open-ended code generation | **Not implemented** | Needs an LLM; blocked steps are reported honestly |
 | Exploitation / payload delivery | **Not implemented** | Deliberately out of scope |
 
@@ -120,6 +120,25 @@ aegis kill                         # engage the killswitch
 aegis resume                       # release it
 aegis gui                          # launch the desktop console
 ```
+
+## Desktop console
+
+`aegis gui` opens a conversation-first assistant surface, not an admin table.
+You describe an objective in the composer; the team plans and works on it, and
+the thread shows each step in plain language with raw commands kept inside
+their own monospace cards.
+
+- **Thread** — the main surface. Ask for something, watch the plan and activity
+  stream in, read the result and next action.
+- **Team** — each agent's self-model: what it can do and where it stops.
+- **Tasks / Audit / Security / Settings** — objectives, the append-only
+  operation log, the authorized scope and safety posture, effective config.
+
+A live agent rail sits on the right showing each agent's state, current action,
+and elapsed time; the killswitch is always one click away in the top bar or the
+left rail. The glass aesthetic is drawn entirely in Tkinter — layered
+translucent panels, hairline borders, a lit top bevel on each card, and a soft
+gradient hero — with no third-party theme or widget dependency.
 
 ## Commands
 
