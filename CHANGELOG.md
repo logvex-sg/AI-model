@@ -31,8 +31,16 @@ versioning follows [Semantic Versioning](https://semver.org/).
   `/v1/resume-task`.
 - Rebuilt desktop console: sidebar workspaces, live per-agent status bar,
   dashboard, and a dark security-console theme.
+- Rebuilt the desktop console as a conversation-first glass UI: a thread
+  composer that streams plan and activity in plain language, monospace command
+  cards, a live agent rail with per-agent state and elapsed time, and an
+  always-present killswitch. Glass is drawn in pure Tkinter — translucent
+  panels, hairline borders, a lit top bevel per card, and a gradient hero.
 - Expanded suite to 74 tests covering recovery, diagnostics, runtime state,
-  messaging, and risk metadata.
+  messaging, and risk metadata; the desktop console adds 5 widget tests that
+  skip cleanly when Tk or a display is unavailable.
+- Added a full [install guide](docs/INSTALL.md): requirements, pipx, venv,
+  run-in-place, verification, uninstall, and PEP 668 troubleshooting.
 
 ### Changed
 - Command execution now records working directory, duration, and state.
