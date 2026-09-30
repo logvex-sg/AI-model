@@ -20,7 +20,7 @@ imports and fail without the correct top-level directory.
 - `aegis/security/` — scope enforcement and reconnaissance
 - `aegis/*.py` — core services (shell, risk, recovery, diagnostics, filesystem, killswitch, …)
 - `tests/` — standard-library `unittest` suite
-- `docs/` — architecture and the original system prompt
+- `docs/` — architecture, install guide, and the original system prompt
 
 ## Conventions
 

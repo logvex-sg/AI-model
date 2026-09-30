@@ -48,10 +48,13 @@ that admits a limit.
 ## Install
 
 ```bash
-git clone --branch aegis-implementation \
+git clone --branch kali-ops-implementation \
   https://github.com/logvex-sg/AI-model.git
 cd AI-model
 ```
+
+For a full walkthrough — requirements, pipx, venv, verification, uninstall, and
+troubleshooting — see the **[install guide](docs/INSTALL.md)**. The short version:
 
 ### Just run it (recommended)
 

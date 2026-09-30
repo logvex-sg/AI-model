@@ -33,6 +33,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
   dashboard, and a dark security-console theme.
 - Expanded suite to 74 tests covering recovery, diagnostics, runtime state,
   messaging, and risk metadata.
+- Added a full [install guide](docs/INSTALL.md): requirements, pipx, venv,
+  run-in-place, verification, uninstall, and PEP 668 troubleshooting.
 
 ### Changed
 - Command execution now records working directory, duration, and state.
