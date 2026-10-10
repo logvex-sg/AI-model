@@ -30,13 +30,16 @@ from typing import Optional, Sequence, Tuple
 RGB = Tuple[int, int, int]
 
 #: The console palette. Deep space blues with cyan and violet accents.
-BACKGROUND_TOP: RGB = (7, 11, 22)
-BACKGROUND_BOTTOM: RGB = (13, 20, 38)
-SURFACE: RGB = (18, 26, 45)
-SURFACE_HIGH: RGB = (24, 34, 58)
-BORDER: RGB = (46, 62, 96)
-BEVEL_TOP: RGB = (86, 116, 168)
-BEVEL_BOTTOM: RGB = (8, 12, 22)
+#: The background and the panel fills are deliberately far apart in luminance
+#: (roughly 18 vs 40): an earlier revision had them within a couple of levels,
+#: which made the "glass" panels vanish into the backdrop.
+BACKGROUND_TOP: RGB = (6, 9, 18)
+BACKGROUND_BOTTOM: RGB = (11, 17, 33)
+SURFACE: RGB = (26, 36, 60)
+SURFACE_HIGH: RGB = (38, 51, 82)
+BORDER: RGB = (64, 86, 128)
+BEVEL_TOP: RGB = (128, 166, 222)
+BEVEL_BOTTOM: RGB = (5, 8, 16)
 ACCENT: RGB = (86, 214, 255)
 ACCENT_WARM: RGB = (168, 130, 255)
 ACCENT_GREEN: RGB = (96, 226, 176)
@@ -82,9 +85,50 @@ def shift_hue(rgb: RGB, delta: float) -> RGB:
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
+def background_at(y: float, height: float) -> RGB:
+    """Sample the base gradient at height *y*.
+
+    Blobs used to be composited against a single constant colour, which made
+    them read as flat discs pasted on top. Blending against the real gradient at
+    each blob's centre lets the light appear to *come from* the backdrop.
+    """
+    if height <= 0:
+        return BACKGROUND_TOP
+    ratio = min(1.0, max(0.0, y / height))
+    return blend(BACKGROUND_TOP, BACKGROUND_BOTTOM, ratio)
+
+
 def glow(tint: RGB, amount: float) -> RGB:
     """A tint that reads as emitted light against the dark background."""
     return blend(SURFACE, tint, amount)
+
+
+def vignette(
+    canvas: tk.Canvas,
+    width: int,
+    height: int,
+    *,
+    strength: float = 0.55,
+    rings: int = 26,
+    tags: Sequence[str] = (),
+) -> None:
+    """Darken the frame edges so the centre reads as lit and raised.
+
+    Approximated with nested rectangles that get progressively darker toward
+    the border. Each ring is drawn as a hollow frame, so the cost is
+    proportional to the ring count rather than the pixel count.
+    """
+    for i in range(rings):
+        ratio = i / rings
+        amount = strength * ratio ** 2
+        if amount <= 0.004:
+            continue
+        color = to_hex(darken(BACKGROUND_TOP, amount))
+        inset = int(ratio * min(width, height) * 0.5)
+        canvas.create_rectangle(
+            inset, inset, width - inset, height - inset,
+            outline=color, width=2, tags=tags,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -124,13 +168,16 @@ def radial_blob(
     *,
     intensity: float = 0.5,
     rings: int = 14,
+    base: Optional[RGB] = None,
     tags: Sequence[str] = (),
 ) -> None:
     """A soft circle of light — concentric rings fading outward.
 
     Drawn as overlapped ovals so the falloff looks like a blurred light source
-    rather than a hard disc.
+    rather than a hard disc. *base* is the colour the light sits on; when
+    omitted it falls back to :data:`SURFACE`.
     """
+    under = base if base is not None else SURFACE
     for i in range(rings, 0, -1):
         ratio = i / rings
         r = radius * ratio
@@ -138,7 +185,7 @@ def radial_blob(
         amount = intensity * (1 - ratio) ** 2
         if amount <= 0.004:
             continue
-        color = blend(SURFACE, tint, amount)
+        color = blend(under, tint, amount)
         canvas.create_oval(
             cx - r, cy - r * 0.72, cx + r, cy + r * 0.72,
             fill=to_hex(color), outline="", tags=tags,
@@ -190,19 +237,42 @@ def draw_glass(
     *,
     tags: Sequence[str] = (),
     behind: RGB = BACKGROUND_BOTTOM,
+    accent: Optional[RGB] = None,
 ) -> None:
-    """Draw one frosted panel: body, border, top bevel, bottom shade."""
+    """Draw one frosted panel: body, sheen, border, bevels, edge glow.
+
+    The body is not a flat fill. A soft vertical sheen (brighter at the top,
+    falling away by about a third of the height) is overlaid so the panel reads
+    as a curved sheet catching light from above. When *accent* is given, a
+    hairline of that colour is drawn along the top edge — the visual cue that a
+    panel is the active one.
+    """
     body = blend(behind, panel.tint, panel.alpha)
     rounded_rect(
         canvas, panel.x0, panel.y0, panel.x1, panel.y1,
         radius=panel.radius, fill=to_hex(body), outline=to_hex(BORDER),
         width=1, tags=tags,
     )
-    # Top bevel: a short bright line inset from the corners.
+
+    # Sheen: a few horizontal bands near the top, kept inside the corner curve.
+    height = panel.y1 - panel.y0
     inset = panel.radius * 0.9
+    sheen_depth = max(2, int(height * 0.32))
+    for i in range(sheen_depth):
+        ratio = i / sheen_depth
+        amount = 0.075 * (1 - ratio) ** 2
+        if amount <= 0.003:
+            continue
+        y = panel.y0 + inset * 0.5 + i
+        canvas.create_line(
+            panel.x0 + inset, y, panel.x1 - inset, y,
+            fill=to_hex(lighten(body, amount)), width=1, tags=tags,
+        )
+
+    # Top bevel: a short bright line inset from the corners.
     canvas.create_line(
         panel.x0 + inset, panel.y0 + 1, panel.x1 - inset, panel.y0 + 1,
-        fill=to_hex(BEVEL_TOP), width=1, tags=tags,
+        fill=to_hex(accent or BEVEL_TOP), width=1, tags=tags,
     )
     # Bottom shade grounds the panel against the background.
     canvas.create_line(
@@ -275,21 +345,46 @@ class LiquidBackground:
         self.t = 0.0
         #: (cx ratio, cy ratio, radius ratio, tint, intensity, speed, phase)
         self._blobs = [
-            (0.18, 0.16, 0.42, ACCENT, 0.30, 0.24, 0.0),
-            (0.82, 0.24, 0.38, ACCENT_WARM, 0.26, 0.17, 1.7),
-            (0.62, 0.86, 0.46, ACCENT_GREEN, 0.17, 0.13, 3.1),
-            (0.30, 0.72, 0.34, ACCENT, 0.13, 0.21, 4.6),
+            (0.18, 0.16, 0.42, ACCENT, 0.16, 0.24, 0.0),
+            (0.82, 0.24, 0.38, ACCENT_WARM, 0.14, 0.17, 1.7),
+            (0.62, 0.86, 0.46, ACCENT_GREEN, 0.10, 0.13, 3.1),
+            (0.30, 0.72, 0.34, ACCENT, 0.08, 0.21, 4.6),
         ]
 
     def paint_static(self) -> None:
-        """Diagonal-ish gradient base, drawn once."""
+        """Diagonal-ish gradient base plus the hero glow, drawn once.
+
+        The glow is a broad, dim pool of accent light centred slightly above the
+        middle. It is static so the expensive part is paid a single time; the
+        blobs animate over the top of it.
+        """
         vertical_gradient(
             self.canvas, 0, 0, self.width, self.height,
             BACKGROUND_TOP, BACKGROUND_BOTTOM, tags=(self.tag, "bg"),
         )
+        radial_blob(
+            self.canvas,
+            self.width * 0.52, self.height * 0.34,
+            min(self.width, self.height) * 0.85,
+            ACCENT, intensity=0.045, rings=18, base=background_at(self.height * 0.34, self.height),
+            tags=(self.tag, "bg"),
+        )
+
+    def paint_vignette(self) -> None:
+        """Redraw the edge darkening above the blobs so the frame stays framed."""
+        self.canvas.delete("liquid_vignette")
+        vignette(
+            self.canvas, self.width, self.height,
+            strength=0.5, rings=22, tags=("liquid_vignette",),
+        )
 
     def paint_blobs(self) -> None:
-        """Redraw the drifting blobs for the current time step."""
+        """Redraw the drifting blobs for the current time step.
+
+        Each blob is composited against the *gradient colour underneath it*,
+        and a wider, dimmer halo is drawn after it so the light blooms into the
+        backdrop instead of ending at a hard rim.
+        """
         self.canvas.delete("liquid_blob")
         for cx_r, cy_r, r_r, tint, intensity, speed, phase in self._blobs:
             drift = self.t * speed + phase
@@ -297,15 +392,24 @@ class LiquidBackground:
             cy = (cy_r + 0.055 * math.cos(drift * 0.8)) * self.height
             radius = r_r * min(self.width, self.height) * (1 + 0.06 * math.sin(drift * 1.3))
             hue_shifted = shift_hue(tint, 0.02 * math.sin(drift * 0.5))
+            under = background_at(cy, self.height)
+            # Bloom first, so the core sits on top of its own haze.
+            radial_blob(
+                self.canvas, cx, cy, radius * 1.9, hue_shifted,
+                intensity=intensity * 0.28, rings=9, base=under,
+                tags=("liquid_blob",),
+            )
             radial_blob(
                 self.canvas, cx, cy, radius, hue_shifted,
-                intensity=intensity, rings=13, tags=("liquid_blob",),
+                intensity=intensity, rings=13, base=under,
+                tags=("liquid_blob",),
             )
 
     def step(self) -> None:
         """Advance time and repaint the moving layer."""
         self.t += 0.016
         self.paint_blobs()
+        self.paint_vignette()
 
 
 def scrolled_text_style() -> dict:

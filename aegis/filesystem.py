@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from .config import Config
 from .errors import ScopeViolation

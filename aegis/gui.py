@@ -104,6 +104,7 @@ class GlassApp:
         self.liquid = L.LiquidBackground(self.canvas, self.WIDTH, self.HEIGHT)
         self.liquid.paint_static()
         self.liquid.paint_blobs()
+        self.liquid.paint_vignette()
         self.root.bind("<Configure>", self._on_resize)
 
     def _on_resize(self, event) -> None:
@@ -114,16 +115,24 @@ class GlassApp:
         self.canvas.configure(width=event.width, height=event.height)
         self.liquid.paint_static()
         self.liquid.paint_blobs()
+        self.liquid.paint_vignette()
 
     # ------------------------------------------------------------------ #
     # shell layout
     # ------------------------------------------------------------------ #
-    def _panel(self, parent, tint, alpha):
-        """A frosted Frame: blended fill plus a lit 1px top bevel."""
+    def _panel(self, parent, tint, alpha, *, accent=None):
+        """A frosted Frame: blended fill plus a lit 1px top bevel.
+
+        The fill is blended against the *background gradient at the panel's
+        vertical centre* rather than a constant, so a panel near the top does
+        not come out looking identical to one near the bottom. *accent* lights
+        the bevel in the panel's own colour.
+        """
         tk = self.tk
-        bg = L.to_hex(L.blend(L.BACKGROUND_BOTTOM, tint, alpha))
+        behind = L.background_at(parent.winfo_y() + 200, self.HEIGHT)
+        bg = L.to_hex(L.blend(behind, tint, alpha))
         frame = tk.Frame(parent, bg=bg)
-        bevel = tk.Frame(frame, bg=L.to_hex(L.BEVEL_TOP), height=1)
+        bevel = tk.Frame(frame, bg=L.to_hex(accent or L.BEVEL_TOP), height=1)
         bevel.pack(fill="x", side="top")
         body = tk.Frame(frame, bg=bg)
         body.pack(fill="both", expand=True)
@@ -132,17 +141,17 @@ class GlassApp:
         return frame
 
     def _build_shell(self) -> None:
-        self.left = self._panel(self.root, L.SURFACE_HIGH, 0.62)
+        self.left = self._panel(self.root, L.SURFACE_HIGH, 0.72, accent=L.BEVEL_TOP)
         self.left.place(x=14, y=14, width=self.RAIL_W, relheight=1.0, height=-28)
 
-        self.center = self._panel(self.root, L.SURFACE_HIGH, 0.5)
+        self.center = self._panel(self.root, L.SURFACE_HIGH, 0.62)
         self.center.place(
             x=self.RAIL_W + 28, y=14,
             relwidth=1.0, width=-(self.RAIL_W + self.SIDE_W + 56),
             relheight=1.0, height=-28,
         )
 
-        self.right = self._panel(self.root, L.SURFACE_HIGH, 0.58)
+        self.right = self._panel(self.root, L.SURFACE_HIGH, 0.68)
         self.right.place(relx=1.0, x=-(self.SIDE_W + 14), y=14, width=self.SIDE_W,
                          relheight=1.0, height=-28)
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 
 from aegis.agents.base import AgentState
-from aegis.config import Config
 from aegis.diagnostics import MISSING, OK, WARN, run_diagnostics
 from aegis.errors import CommandError, ErrorClass, RecoveryExhausted, RiskDenied
 from aegis.recovery import RecoveryEngine
@@ -92,8 +92,23 @@ class DiagnosticsTests(RuntimeTestCase):
     def test_report_structure(self) -> None:
         report = run_diagnostics(self.config)
         names = {c.component for c in report.checks}
-        for expected in {"OS", "PYTHON", "GIT", "NETWORK", "KILLSWITCH", "MODEL"}:
+        for expected in {"OS", "PYTHON", "GUI", "GIT", "NETWORK", "KILLSWITCH", "MODEL"}:
             self.assertIn(expected, names)
+
+    def test_gui_check_reports_a_concrete_status(self) -> None:
+        """The console toolkit must be diagnosed, not discovered on failure.
+
+        A missing tkinter used to be invisible until `aegis gui` died. The
+        check has to say which of the three states the host is in: no tkinter,
+        tkinter but headless, or a working display.
+        """
+        report = run_diagnostics(self.config)
+        gui = next(c for c in report.checks if c.component == "GUI")
+        self.assertIn(gui.status, {OK, WARN, MISSING})
+        self.assertTrue(gui.detail)
+        headless = not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        if headless and gui.status != MISSING:
+            self.assertIn("DISPLAY", gui.detail)
 
     def test_every_check_has_a_status(self) -> None:
         report = run_diagnostics(self.config)
