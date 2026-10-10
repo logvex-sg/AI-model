@@ -38,10 +38,16 @@ def _build_runtime(args: argparse.Namespace, *, dry_run: Optional[bool] = None) 
     overrides: Dict[str, Any] = {}
     if getattr(args, "home", None):
         overrides["home"] = Path(args.home)
+    if getattr(args, "root", False):
+        overrides["allow_root"] = True
+    if getattr(args, "allow_high_risk", False):
+        overrides["auto_approve_high_risk"] = True
     config = load_config(getattr(args, "config", None), overrides)
     if dry_run is None:
         dry_run = getattr(args, "dry_run", False)
-    return Runtime.build(config, dry_run=dry_run)
+    # The CLI is interactive, so sudo may prompt for a password here in a way
+    # the API and GUI worker cannot.
+    return Runtime.build(config, dry_run=dry_run, interactive=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +97,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         {
             "version": __version__,
             "home": str(rt.config.home),
+            "privilege": rt.privileges.report().to_dict() if rt.privileges else {},
+            "llm": {
+                "provider": rt.config.model_provider,
+                "model": rt.config.model_name,
+                "available": rt.llm_available,
+            },
             "killswitch": {
                 "engaged": rt.killswitch.is_engaged(),
                 "reason": rt.killswitch.reason(),
@@ -164,6 +176,19 @@ def cmd_task(args: argparse.Namespace) -> int:
     report = rt.run_task(args.objective, args.scope or "")
     _print(report)
     return 0 if report.get("STATUS") == "COMPLETE" else 1
+
+
+def cmd_privilege(args: argparse.Namespace) -> int:
+    """Report how the agent can execute: user, root, or elevated."""
+    rt = _build_runtime(args)
+    report = rt.privileges.report() if rt.privileges else None
+    if report is None:
+        _print({"error": "no privilege manager"})
+        return 1
+    _print(report.to_dict())
+    for line in rt.privileges.describe():
+        print(line)
+    return 0
 
 
 def cmd_resume_task(args: argparse.Namespace) -> int:
@@ -360,6 +385,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="path to config.toml")
     parser.add_argument("--home", help="override $KALI_AEGIS_HOME")
     parser.add_argument("--dry-run", action="store_true", help="plan without executing")
+    parser.add_argument(
+        "--root",
+        action="store_true",
+        help="permit root/elevated execution (also KALI_AEGIS_ALLOW_ROOT=1)",
+    )
+    parser.add_argument(
+        "--allow-high-risk",
+        action="store_true",
+        help="skip HIGH-risk confirmation prompts (disposable environments only)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name: str, fn, help_text: str, **kwargs) -> argparse.ArgumentParser:
@@ -397,6 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("resume-task", cmd_resume_task, "resume an INTERRUPTED task")
     p.add_argument("task_id")
+
+    add("privilege", cmd_privilege, "show root/elevation capability")
 
     add("tasks", cmd_tasks, "list known tasks")
 

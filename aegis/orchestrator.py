@@ -12,12 +12,15 @@ from typing import Any, Dict, List, Optional
 
 from .agents import BuilderAgent, ExecutorAgent, LeaderAgent, PentesterAgent
 from .agents.base import Agent, AgentResult
+from .ai import AIAgent
 from .config import Config
 from .diagnostics import DiagnosticsReport, run_diagnostics
 from .errors import AegisHaltedError
 from .filesystem import FileSystem
 from .killswitch import Killswitch
+from .llm import LLMClient, resolve_base_url
 from .logging import OperationLog
+from .privilege import PrivilegeManager
 from .recovery import RecoveryEngine
 from .shell import Shell
 from .state import StateStore, Task, TaskStatus
@@ -35,14 +38,32 @@ class Runtime:
     fs: FileSystem
     agents: Dict[str, Agent] = field(default_factory=dict)
     recovery: Optional[RecoveryEngine] = None
+    privileges: Optional[PrivilegeManager] = None
+    ai: Optional[AIAgent] = None
 
     @classmethod
-    def build(cls, config: Config, *, dry_run: bool = False) -> "Runtime":
+    def build(
+        cls,
+        config: Config,
+        *,
+        dry_run: bool = False,
+        interactive: bool = False,
+    ) -> "Runtime":
         config.ensure_home()
         killswitch = Killswitch(config)
         log = OperationLog(config.log_path)
         state = StateStore(config)
-        shell = Shell(config, killswitch, log, agent="executor", dry_run=dry_run)
+        privileges = PrivilegeManager(
+            allow_root=config.allow_root, interactive=interactive
+        )
+        shell = Shell(
+            config,
+            killswitch,
+            log,
+            agent="executor",
+            dry_run=dry_run,
+            privileges=privileges,
+        )
         fs = FileSystem(config, killswitch, log, agent="builder")
         recovery = RecoveryEngine(
             killswitch,
@@ -58,6 +79,24 @@ class Runtime:
             "pentester": PentesterAgent(config, killswitch, log=log),
             "executor": ExecutorAgent(config, killswitch, log=log),
         }
+
+        client = LLMClient(
+            base_url=resolve_base_url(config.model_provider, config.model_base_url),
+            model=config.model_name if config.model_name != "none" else "",
+            api_key=config.model_api_key,
+            timeout=config.model_timeout,
+            temperature=config.model_temperature,
+            max_tokens=config.model_max_tokens,
+        )
+        ai = AIAgent(
+            client=client,
+            execute_command=shell.run,
+            read_file=lambda p: fs.read(p),
+            write_file=fs.write,
+            list_dir=fs.list,
+            max_iterations=config.max_agent_iterations,
+        )
+
         return cls(
             config=config,
             killswitch=killswitch,
@@ -67,6 +106,8 @@ class Runtime:
             fs=fs,
             agents=agents,
             recovery=recovery,
+            privileges=privileges,
+            ai=ai,
         )
 
     # -- convenience accessors ----------------------------------------------
@@ -97,9 +138,15 @@ class Runtime:
             "killswitch_engaged": self.killswitch.is_engaged(),
             "killswitch_reason": self.killswitch.reason(),
             "model_provider": self.config.model_provider,
-            "llm_configured": self.config.model_provider not in {"", "none"},
+            "llm_configured": self.llm_available,
+            "privilege": self.privileges.report().to_dict() if self.privileges else {},
             "dry_run": self.shell.dry_run,
         }
+
+    @property
+    def llm_available(self) -> bool:
+        """Whether the reasoning loop can actually reach a model."""
+        return bool(self.ai and self.ai.available and self.config.llm_ready)
 
     def diagnostics(self) -> DiagnosticsReport:
         """Run the startup health assessment."""
@@ -131,23 +178,112 @@ class Runtime:
         return out[-limit:]
 
     # -- workflows -----------------------------------------------------------
-    def plan(self, objective: str, scope: str = "") -> Dict[str, Any]:
-        """Create a task and decompose it, without executing anything."""
+    def _topic_plan(self, objective: str, scope: str) -> Dict[str, Any]:
+        """Build a plan skeleton, preferring the model when one is available.
+
+        Kept for callers that want the plan without running anything.
+        """
         task = self.state.create(objective, scope)
         result = self.leader.decompose(task)
         self.state.save()
         return {"task_id": task.id, "plan": result.to_dict()}
 
-    def run_task(self, objective: str, scope: str = "") -> Dict[str, Any]:
-        """Plan and execute an objective end-to-end.
+    def plan(self, objective: str, scope: str = "") -> Dict[str, Any]:
+        """Create a task and decompose it, without executing anything."""
+        return self._topic_plan(objective, scope)
 
-        Only subtasks the deterministic core can actually carry out are
-        executed. A subtask that needs an LLM or an explicit command is marked
-        BLOCKED with a reason rather than being reported as done. The run stops
-        cleanly if the killswitch engages, marking the task INTERRUPTED.
+    def act(self, objective: str, scope: str = "") -> Dict[str, Any]:
+        """Pursue an objective with the reasoning loop, executing real actions.
+
+        This is the AI path. The model chooses actions; every one runs through
+        the same policy, privilege, killswitch, and audit layers a CLI command
+        would. When no model is configured the deterministic task runner is used
+        instead, so the method always returns a truthful report of what happened.
         """
+        if self.killswitch.is_engaged():
+            return {
+                "OBJECTIVE": objective,
+                "SCOPE": scope or "(unspecified)",
+                "MODE": "halted",
+                "PLAN": [], "ACTIVE AGENTS": [], "ACTIONS": [], "RESULTS": [],
+                "ERRORS": [self.killswitch.reason() or "killswitch engaged"],
+                "VERIFICATION": "nothing ran", "FILES CHANGED": [],
+                "COMMANDS EXECUTED": [], "ELEVATED": [],
+                "NEXT ACTION": "release the killswitch and retry",
+                "STATUS": "INTERRUPTED",
+                "STEPS": [],
+            }
+        if not self.llm_available:
+            report = self._deterministic(objective, scope)
+            report["MODE"] = "deterministic (no LLM configured)"
+            return report
+
+        run = self.ai.run(objective, scope=scope)
+        return self._ai_report(objective, scope, run)
+
+    def _ai_report(self, objective: str, scope: str, run) -> Dict[str, Any]:
+        commands = [
+            s.arguments.get("command", "")
+            for s in run.steps
+            if s.tool == "run_command" and s.arguments.get("command")
+        ]
+        files = [
+            s.arguments.get("path", "")
+            for s in run.steps
+            if s.tool in {"write_file", "read_file"} and s.arguments.get("path")
+        ]
+        results = [
+            f"{s.tool}: {'ok' if s.ok else 'FAILED'}" + (f" — {s.detail}" if s.detail else "")
+            for s in run.steps
+        ]
+        elevated = [
+            s.arguments.get("executed") or s.arguments.get("command", "")
+            for s in run.steps
+            if s.tool == "run_command" and s.arguments.get("elevated")
+        ]
+        errors = [s.detail for s in run.steps if not s.ok and s.detail]
+        if run.error:
+            errors.append(run.error)
+
+        if run.ok:
+            status = "COMPLETE"
+        elif errors:
+            status = "BLOCKED"
+        else:
+            status = "FAILED"
+
+        return {
+            "OBJECTIVE": objective,
+            "SCOPE": scope or "(unspecified)",
+            "MODE": f"AI ({self.config.model_name} via {self.config.model_provider})",
+            "PLAN": [s.tool for s in run.steps if s.kind == "tool"],
+            "ACTIVE AGENTS": ["leader", "executor"],
+            "ACTIONS": results,
+            "RESULTS": [run.answer] if run.answer else [],
+            "ERRORS": errors,
+            "VERIFICATION": (
+                f"{run.iterations} model turns, {run.tokens} tokens, "
+                f"{len(run.steps)} actions"
+            ),
+            "FILES CHANGED": sorted({f for f in files if f}),
+            "COMMANDS EXECUTED": commands,
+            "ELEVATED": elevated,
+            "NEXT ACTION": "none" if run.ok else "review the errors above and retry",
+            "STATUS": status,
+            "STEPS": [s.to_dict() for s in run.steps],
+        }
+
+    def _deterministic(self, objective: str, scope: str) -> Dict[str, Any]:
         task = self.state.create(objective, scope)
         return self._execute_task(task, scope)
+
+    def run_task(self, objective: str, scope: str = "") -> Dict[str, Any]:
+        """Pursue an objective using whichever engine is available.
+
+        Delegates to the reasoning loop when a model is configured and to the
+        deterministic runner otherwise.
+        """
+        return self.act(objective, scope)
 
     def resume_task(self, task_id: str) -> Dict[str, Any]:
         """Re-run an INTERRUPTED task from its existing plan."""
