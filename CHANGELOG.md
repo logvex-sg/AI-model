@@ -4,6 +4,36 @@ All notable changes to KALI-AEGIS are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Optional LLM reasoning layer (`llm.py`, `ai.py`): when a model is configured
+  the planner asks it to reason over the objective and produces a plan; with no
+  model configured the deterministic planner still runs, so the tool never
+  depends on a network service. `aegis doctor` reports the model row and the
+  core degrades cleanly when it is absent.
+- Privilege layer (`privilege.py`): detects root vs. passwordless `sudo`,
+  gates elevation behind an explicit `allow_root` setting, and refuses to
+  elevate when the policy is off. Elevated commands stay audited like any other.
+- `aegis doctor` now reports a **GUI** row: `OK` with a usable display, `WARN`
+  when tkinter is present but headless (with the `xvfb-run` hint), and `MISSING`
+  when tkinter is not installed (with the platform install command). A missing
+  console toolkit is diagnosable instead of discovered on first launch.
+
+### Changed
+- Rebalanced the console palette so the glass is actually visible. The panel
+  fill previously landed within ~1 luminance level of the background, so the
+  three-column layout read as a single flat field. Panels now sit ~25 levels
+  above the backdrop, and the liquid background composites blobs against the
+  gradient beneath them (plus bloom and a vignette) rather than a constant.
+- Panel fills are blended against the background gradient at the panel's own
+  vertical position, so top and bottom cards no longer render identically.
+
+### Fixed
+- Removed genuinely unused imports in `diagnostics.py`, `filesystem.py`,
+  `state.py`, and two test modules; the lint run is now clean rather than
+  filtered.
+
 ## [0.2.0] - 2026-09-30
 
 ### Added

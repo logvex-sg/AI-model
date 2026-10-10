@@ -13,7 +13,6 @@ import platform
 import shutil
 import socket
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -149,6 +148,32 @@ def _root_detail() -> Tuple[str, str]:
     return WARN, "not root; sudo not found"
 
 
+def _check_gui() -> Check:
+    """Report whether the desktop console can actually open.
+
+    ``import tkinter`` is the cheap part; the expensive part is whether Tk can
+    reach a display. We only attempt the full probe when a display is present,
+    so headless environments are not forced to start an X server to get a
+    truthful answer.
+    """
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        return Check("GUI", MISSING, "tkinter not installed; `aegis gui` unavailable")
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not has_display:
+        return Check("GUI", WARN, "tkinter present; no DISPLAY (headless, use xvfb-run)")
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        version = root.tk.call("info", "patchlevel")
+        root.destroy()
+        return Check("GUI", OK, f"Tk {version} on {os.environ.get('DISPLAY')}")
+    except Exception as exc:  # pragma: no cover - display dependent
+        return Check("GUI", WARN, f"display probe failed: {exc}")
+
+
 def run_diagnostics(config: Optional[Config] = None) -> DiagnosticsReport:
     """Execute the full health assessment."""
     report = DiagnosticsReport()
@@ -170,6 +195,7 @@ def run_diagnostics(config: Optional[Config] = None) -> DiagnosticsReport:
     add(Check("NETWORK", OK if net else WARN, "outbound TCP reachable" if net else "no outbound TCP"))
 
     add(Check("PYTHON", OK, platform.python_version()))
+    add(_check_gui())
     add(_check_tool("GIT", "git", required=True))
     add(_check_tool("DOCKER", "docker"))
     add(_check_tool("COMPILER", "gcc", "clang", "cc"))

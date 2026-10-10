@@ -7,17 +7,15 @@ headless build machine without Tk installed.
 
 from __future__ import annotations
 
+import importlib.util
 import time
 import unittest
 
 from tests import RuntimeTestCase
 
-try:  # pragma: no cover - depends on host libraries
-    import tkinter  # noqa: F401
-
-    _HAS_TK = True
-except ImportError:  # pragma: no cover
-    _HAS_TK = False
+#: Tkinter is an optional dependency; probe for it instead of importing, so the
+#: module has no unused import and still skips cleanly on a headless build box.
+_HAS_TK = importlib.util.find_spec("tkinter") is not None
 
 
 @unittest.skipUnless(_HAS_TK, "Tkinter is not installed")
@@ -113,6 +111,45 @@ class GlassGuiTest(RuntimeTestCase):
 
         self.app = GlassApp(self.runtime)
         self.app.root.update()
+
+    def test_panels_are_visibly_lighter_than_the_backdrop(self) -> None:
+        """The glass has to actually read as glass.
+
+        An earlier revision blended the panel fill almost exactly onto the
+        background (a luminance delta under 2), so the layout looked like one
+        flat field. This pins a real separation so a future palette tweak that
+        flattens it again fails here instead of shipping.
+        """
+        from aegis import liquid as L
+
+        behind = L.background_at(self.app.HEIGHT * 0.45, self.app.HEIGHT)
+        for name, tint, alpha in (
+            ("left", L.SURFACE_HIGH, 0.72),
+            ("center", L.SURFACE_HIGH, 0.62),
+            ("right", L.SURFACE_HIGH, 0.68),
+        ):
+            panel = L.blend(behind, tint, alpha)
+
+            def lum(rgb):
+                return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+            delta = lum(panel) - lum(behind)
+            self.assertGreater(
+                delta, 8.0,
+                f"{name} panel is only {delta:.1f} luminance above the background",
+            )
+
+    def test_nav_highlights_the_active_view(self) -> None:
+        from aegis import liquid as L
+
+        self.app._show("audit")
+        self.app.root.update()
+        self.assertEqual(self.app._view, "audit")
+        # Exactly the active row is painted in the accent colour; the rest stay
+        # dim. This is the only visual cue for which view is on screen.
+        accent = L.to_hex(L.ACCENT)
+        hot = [k for k, b in self.app._nav_buttons.items() if b.cget("fg") == accent]
+        self.assertEqual(hot, ["audit"])
 
 
 if __name__ == "__main__":  # pragma: no cover

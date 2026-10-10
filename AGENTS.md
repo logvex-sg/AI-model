@@ -54,12 +54,32 @@ imports and fail without the correct top-level directory.
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -t .          # 79 tests
+python3 -m unittest discover -s tests -t .          # 120 tests
 xvfb-run -a python3 -m unittest discover -s tests -t .   # includes GUI tests
 ```
 
 The GUI tests skip cleanly when Tk or a display is missing, so the suite runs
 on a headless builder.
+
+## The console look is a tested invariant
+
+`aegis/liquid.py` owns every colour and primitive; `aegis/gui.py` only arranges
+them. Two rules keep the glass readable, and both are pinned by tests in
+`tests/test_gui.py`:
+
+- **Panels must be clearly lighter than the backdrop.** An earlier palette
+  blended the panel fill to within ~1 luminance level of the background, so the
+  layout collapsed into one flat field. `test_panels_are_visibly_lighter_than_the_backdrop`
+  fails if that separation drops below 8.
+- **Blobs composite against the gradient beneath them**, not a constant
+  `SURFACE`. Use `L.background_at(y, height)` when drawing anything that sits on
+  the animated background, or it will read as pasted on.
+- Changing a `BACKGROUND_*`/`SURFACE*`/`BEVEL_*` constant is safe only if that
+  contrast test still passes.
+
+Headless hosts: `aegis doctor` reports a GUI row (`OK` with a display, `WARN`
+when tkinter is present but headless, `MISSING` without tkinter, each with the
+install hint). Do not "discover" a broken display by launching the GUI blind.
 
 ## Safety
 
