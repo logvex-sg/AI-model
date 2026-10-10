@@ -17,9 +17,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 from .config import Config
-from .errors import CommandError, ErrorClass, classify_returncode
+from .errors import CommandError, ErrorClass, PrivilegeDenied, classify_returncode
 from .killswitch import Killswitch
 from .logging import OperationLog
+from .privilege import Privilege, PrivilegeManager
 from .risk import Risk, RiskAssessment, classify
 from .secrets import redact
 
@@ -47,10 +48,18 @@ class CommandResult:
     started_at: float = 0.0
     timed_out: bool = False
     dry_run: bool = False
+    #: The privilege the command actually ran under.
+    privilege: str = Privilege.USER.value
+    #: The command string as executed, after any sudo prefixing.
+    executed: str = ""
 
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and not self.timed_out and not self.dry_run
+
+    @property
+    def elevated(self) -> bool:
+        return self.privilege in {Privilege.ROOT.value, Privilege.ELEVATED.value}
 
     @property
     def error_class(self) -> ErrorClass:
@@ -60,6 +69,7 @@ class CommandResult:
         state = "dry-run" if self.dry_run else ("ok" if self.ok else "failed")
         return {
             "command": self.command,
+            "executed": self.executed or self.command,
             "cwd": self.cwd,
             "agent": self.agent,
             "returncode": self.returncode,
@@ -67,6 +77,8 @@ class CommandResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "risk": str(self.risk),
+            "privilege": self.privilege,
+            "elevated": self.elevated,
             "duration_ms": self.duration_ms,
             "timed_out": self.timed_out,
             "dry_run": self.dry_run,
@@ -115,12 +127,16 @@ class Shell:
         *,
         agent: str = "executor",
         dry_run: bool = False,
+        privileges: Optional[PrivilegeManager] = None,
     ) -> None:
         self.config = config
         self.killswitch = killswitch
         self.log = log
         self.agent = agent
         self.dry_run = dry_run
+        self.privileges = privileges or PrivilegeManager(
+            allow_root=config.allow_root, interactive=False
+        )
 
     def assess(self, command: str) -> RiskAssessment:
         return classify(command)
@@ -134,12 +150,19 @@ class Shell:
         cwd: Optional[str] = None,
         check: bool = False,
         agent: Optional[str] = None,
+        require_root: Optional[bool] = None,
     ) -> CommandResult:
-        """Execute *command* subject to the killswitch and risk policy.
+        """Execute *command* subject to the killswitch, risk, and privilege policy.
+
+        Args:
+            require_root: Force elevation for this command. When ``None`` the
+                decision comes from the risk assessment and whether the command
+                already carries ``sudo``.
 
         Raises:
             AegisHaltedError: the switch is engaged.
             RiskDenied: the command is HIGH risk and not confirmed.
+            PrivilegeDenied: the command needs root that is unavailable.
             CommandError: ``check=True`` and the command failed.
         """
         self.killswitch.guard("shell command")
@@ -158,6 +181,7 @@ class Shell:
                 result=assessment.reason,
                 cwd=working_dir,
                 agent=requesting_agent,
+                extra={"risk": str(assessment.risk), "event": "risk-denied"},
             )
             from .errors import RiskDenied
 
@@ -166,6 +190,26 @@ class Shell:
                 f"({assessment.reason}). Re-run with confirmation or set "
                 f"KALI_AEGIS_AUTO_APPROVE_HIGH_RISK=1 in a disposable environment."
             )
+
+        # Resolve privilege before anything runs so a refusal is cheap and the
+        # audit trail records the decision, not just the outcome.
+        wants_root = (
+            assessment.requires_root if require_root is None else require_root
+        )
+        try:
+            effective_command, privilege = self.privileges.elevate(
+                command, requires_root=wants_root
+            )
+        except PermissionError as exc:
+            self._record(
+                command,
+                status="denied",
+                result=str(exc),
+                cwd=working_dir,
+                agent=requesting_agent,
+                extra={"event": "privilege-denied", "require_root": wants_root},
+            )
+            raise PrivilegeDenied(str(exc)) from exc
 
         if self.dry_run:
             self._record(
@@ -185,13 +229,15 @@ class Shell:
                 agent=requesting_agent,
                 dry_run=True,
                 started_at=time.time(),
+                privilege=privilege.value,
+                executed=effective_command,
             )
 
         effective_timeout = timeout or self.config.command_timeout
         started = time.time()
         try:
             proc = subprocess.run(
-                command,
+                effective_command,
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -208,6 +254,8 @@ class Shell:
                 agent=requesting_agent,
                 duration_ms=int((time.time() - started) * 1000),
                 started_at=started,
+                privilege=privilege.value,
+                executed=effective_command,
             )
         except subprocess.TimeoutExpired:
             result = CommandResult(
@@ -221,6 +269,8 @@ class Shell:
                 duration_ms=int((time.time() - started) * 1000),
                 started_at=started,
                 timed_out=True,
+                privilege=privilege.value,
+                executed=effective_command,
             )
 
         self._record(
@@ -230,7 +280,14 @@ class Shell:
             exit_code=result.returncode,
             cwd=working_dir,
             agent=requesting_agent,
-            extra={"duration_ms": result.duration_ms, "error_class": result.error_class.value},
+            extra={
+                "duration_ms": result.duration_ms,
+                "error_class": result.error_class.value,
+                "risk": str(result.risk),
+                "privilege": result.privilege,
+                "elevated": result.elevated,
+                "executed": effective_command,
+            },
         )
 
         if check and not result.ok:

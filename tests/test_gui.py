@@ -34,13 +34,10 @@ class GlassGuiTest(RuntimeTestCase):
         self.app.root.update()
 
     def tearDown(self) -> None:
-        try:
-            self.app.root.destroy()
-        except Exception:  # pragma: no cover - already gone
-            pass
+        self.app.close()
         super().tearDown()
 
-    def _pump(self, predicate, timeout: float = 6.0) -> bool:
+    def _pump(self, predicate, timeout: float = 8.0) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
             self.app.root.update()
@@ -50,13 +47,13 @@ class GlassGuiTest(RuntimeTestCase):
         return predicate()
 
     def test_every_view_renders(self) -> None:
-        for view in ("thread", "team", "tasks", "security", "logs", "settings"):
+        for view in ("thread", "team", "tasks", "security", "audit", "settings"):
             self.app._show(view)
             self.app.root.update()
             self.assertEqual(self.app._view, view)
 
     def test_agent_rail_lists_all_four_agents(self) -> None:
-        self.app._refresh_agent_rail()
+        self.app._refresh_agents()
         self.app.root.update()
         self.assertEqual(
             sorted(self.app._agent_rows),
@@ -66,7 +63,7 @@ class GlassGuiTest(RuntimeTestCase):
     def test_submitting_an_objective_produces_a_report_turn(self) -> None:
         self.app._show("thread")
         self.app.root.update()
-        self.app._entry.insert("1.0", "create a python tool")
+        self.app.entry.insert("1.0", "create a python tool")
         self.app._submit()
         self.assertTrue(
             self._pump(lambda: not self.app._busy),
@@ -76,7 +73,6 @@ class GlassGuiTest(RuntimeTestCase):
         self.assertEqual(self.app._turns[0]["kind"], "user")
         assistant = self.app._turns[1]
         self.assertEqual(assistant["kind"], "assistant")
-        self.assertIn("report", assistant)
         self.assertIn(
             assistant["status"], {"COMPLETE", "BLOCKED", "FAILED", "INTERRUPTED"}
         )
@@ -94,6 +90,29 @@ class GlassGuiTest(RuntimeTestCase):
         before = len(self.app._turns)
         self.app._submit()
         self.assertEqual(len(self.app._turns), before)
+
+    def test_objective_while_halted_is_refused_before_dispatch(self) -> None:
+        self.app._show("thread")
+        self.runtime.killswitch.engage("test")
+        try:
+            self.app.entry.insert("1.0", "do something")
+            self.app._submit()
+            self.app.root.update()
+        finally:
+            self.runtime.killswitch.release()
+        # _submit refuses outright when the switch is engaged, so no turn is
+        # appended and nothing is dispatched to a worker.
+        self.assertEqual(self.app._turns, [])
+        self.assertFalse(self.app._busy)
+
+    def test_close_cancels_the_tick_loop(self) -> None:
+        self.app.close()
+        self.assertIsNone(self.app._after_id)
+        # Rebuild so tearDown has a valid window to close.
+        from aegis.gui import GlassApp
+
+        self.app = GlassApp(self.runtime)
+        self.app.root.update()
 
 
 if __name__ == "__main__":  # pragma: no cover

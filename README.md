@@ -18,9 +18,11 @@ This is a working framework, not a proof of concept. What is implemented today:
 | Agent runtime state | Implemented | IDLE / THINKING / PLANNING / EXECUTING / ERROR / STOPPED, with live counters |
 | Structured inter-agent messaging | Implemented | Assignments and verification results with status, error, recommended action |
 | Task planning / decomposition | Implemented | Template-based intent routing; no LLM required |
+| **AI reasoning loop** | **Implemented** | Any OpenAI-compatible endpoint; the model calls real tools |
 | Recovery engine | Implemented | Classify → strategise → retry with backoff and an anti-spin guard |
 | Shell execution with audit trail | Implemented | Every command logs command, cwd, exit code, duration, state |
 | Risk policy (LOW/MEDIUM/HIGH) | Implemented | Reversibility, privilege need, and category assessed before execution |
+| **Root / elevated execution** | **Implemented** | Off by default; `--root` enables `sudo`, every use is stamped in the audit log |
 | Killswitch | Implemented | Env var or sentinel file; checked before every action |
 | Persistent task + project state | Implemented | Atomic JSON state under `$KALI_AEGIS_HOME` |
 | Secret redaction | Implemented | Tokens, keys, JWTs, PEM blocks scrubbed from all output |
@@ -28,22 +30,25 @@ This is a working framework, not a proof of concept. What is implemented today:
 | Scoped reconnaissance | Implemented | TCP connect scan + banner grab, scope-enforced |
 | Diagnostics table | Implemented | `aegis doctor` reports each component as OK / WARN / MISSING |
 | REST API | Implemented | Stdlib `http.server`, loopback by default |
-| Desktop console | Implemented | Tkinter glass UI; thread composer, live agent rail, killswitch |
-| Open-ended code generation | **Not implemented** | Needs an LLM; blocked steps are reported honestly |
+| Desktop console | Implemented | Tkinter liquid-glass UI; AI thread, live agent rail, killswitch |
 | Exploitation / payload delivery | **Not implemented** | Deliberately out of scope |
 
 Read the [architecture](docs/ARCHITECTURE.md) for how the pieces fit.
 
 ## The important caveat
 
-KALI-AEGIS has **no built-in LLM**. The deterministic core does real work — shell
-execution, risk enforcement, filesystem operations, scoped recon, recovery,
-audit logging — but it cannot invent code from a natural-language objective on
-its own. When a planned step needs reasoning it does not have, the run reports
-`STATUS: BLOCKED` with a reason instead of pretending it succeeded.
+The reasoning loop is **optional and off by default**. With no model configured,
+KALI-AEGIS falls back to its deterministic core: shell execution, risk
+enforcement, filesystem operations, scoped recon, recovery, and audit logging
+all still work, but a natural-language objective that needs reasoning is
+reported as `STATUS: BLOCKED` with a concrete reason rather than guessed at.
 
-That honesty is the point. An agent that fabricates success is worse than one
-that admits a limit.
+Configure an OpenAI-compatible endpoint and the same objective is pursued for
+real: the model chooses actions, and every action runs through the same risk
+policy, privilege layer, killswitch, and audit trail a CLI command would.
+
+Either way the reporting is honest. An agent that fabricates success is worse
+than one that admits a limit.
 
 ## Install
 
@@ -121,6 +126,66 @@ aegis resume                       # release it
 aegis gui                          # launch the desktop console
 ```
 
+## AI reasoning engine
+
+KALI-AEGIS speaks the OpenAI chat-completions protocol, so it works with OpenAI,
+DeepSeek, Groq, Together, OpenRouter, xAI, Mistral, or a local Ollama /
+LM Studio / vLLM server. Configure it with environment variables:
+
+```bash
+export KALI_AEGIS_MODEL_PROVIDER=deepseek       # or openai, groq, ollama, custom…
+export KALI_AEGIS_MODEL_NAME=deepseek-chat
+export KALI_AEGIS_MODEL_API_KEY=sk-...          # Ollama and LM Studio need none
+aegis task "find the largest files under /var and summarise them"
+```
+
+| Variable | Meaning |
+|---|---|
+| `KALI_AEGIS_MODEL_PROVIDER` | `none` (default), `openai`, `deepseek`, `groq`, `together`, `openrouter`, `xai`, `mistral`, `ollama`, `lmstudio`, or `custom` |
+| `KALI_AEGIS_MODEL_BASE_URL` | Override the endpoint; required for `custom` |
+| `KALI_AEGIS_MODEL_NAME` | Model identifier |
+| `KALI_AEGIS_MODEL_API_KEY` | Bearer token (name is configurable via `KALI_AEGIS_MODEL_API_KEY_ENV`) |
+| `KALI_AEGIS_MODEL_TIMEOUT` | Per-request timeout in seconds (default 60) |
+| `KALI_AEGIS_MODEL_MAX_TOKENS` | Response cap (default 2048) |
+| `KALI_AEGIS_MAX_AGENT_ITERATIONS` | Tool-call budget per objective (default 12) |
+
+The model is given four tools — `run_command`, `read_file`, `write_file`,
+`list_dir` — and a `finish` tool. Every call is routed through the existing
+executor, so the risk policy, privilege layer, killswitch, and audit log all
+still apply. The model cannot bypass them; a refused call comes back to it as a
+failed step it has to reason about.
+
+`aegis doctor` reports the model as `OK` only when provider, endpoint, and key
+are all actually present. A provider name with no key reads as `WARN`, not a
+false `OK`.
+
+## Root and elevated execution
+
+Root is available but **off by default**, and it is a permission to administer
+*this* machine — never authorization to touch third-party systems.
+
+```bash
+aegis privilege                    # what can this host actually do?
+aegis --root exec "apt-get update" # allow privileged commands
+aegis --allow-high-risk exec "..." # skip HIGH-risk confirmation (lab only)
+```
+
+What happens when root is allowed:
+
+- Commands are classified first. Only ones that genuinely need root
+  (`apt`, `systemctl`, `mount`, writes under `/etc`, …) get elevated.
+- Non-interactive callers (the API and the GUI worker) use `sudo -n` and fail
+  fast if passwordless sudo is unavailable, because they cannot prompt.
+  The CLI uses plain `sudo`, which may prompt.
+- The result records `privilege` (`user` / `root` / `elevated`) and an
+  `elevated` flag, and the same fields land in the audit log and the console.
+- With root disabled, a command that needs it raises `PrivilegeDenied`
+  (exit code 9) and is logged as `denied` — it does not run and it does not
+  silently fall back.
+
+Environment equivalents: `KALI_AEGIS_ALLOW_ROOT=1`,
+`KALI_AEGIS_AUTO_APPROVE_HIGH_RISK=1`.
+
 ## Desktop console
 
 `aegis gui` opens a conversation-first assistant surface, not an admin table.
@@ -129,16 +194,21 @@ the thread shows each step in plain language with raw commands kept inside
 their own monospace cards.
 
 - **Thread** — the main surface. Ask for something, watch the plan and activity
-  stream in, read the result and next action.
+  stream in, read the result and next action. When a model is configured the
+  objective actually runs; when it is not, the view says so and falls back to
+  the deterministic runner.
 - **Team** — each agent's self-model: what it can do and where it stops.
 - **Tasks / Audit / Security / Settings** — objectives, the append-only
   operation log, the authorized scope and safety posture, effective config.
 
 A live agent rail sits on the right showing each agent's state, current action,
-and elapsed time; the killswitch is always one click away in the top bar or the
-left rail. The glass aesthetic is drawn entirely in Tkinter — layered
-translucent panels, hairline borders, a lit top bevel on each card, and a soft
-gradient hero — with no third-party theme or widget dependency.
+and elapsed time; the killswitch is always one click away in the left rail.
+
+The window is drawn with a liquid-glass treatment: an animated background of
+soft drifting light, frosted panels whose fills are blended from what sits
+behind them, a lit hairline along each panel's top edge and a shaded one along
+the bottom, and a slow specular sweep across the hero. It is all built from
+Tkinter canvas primitives — no third-party theme, no widget library, no Pillow.
 
 ## Commands
 
@@ -151,6 +221,7 @@ gradient hero — with no third-party theme or widget dependency.
 | `task <objective>` | Plan and execute an objective |
 | `resume-task <id>` | Resume an INTERRUPTED task |
 | `tasks` | List known tasks |
+| `privilege` | Root/elevation capability on this host |
 | `exec <command>` | Execute a shell command |
 | `shell` | Interactive command shell |
 | `agents` / `monitor` | Self-models / live state |
@@ -164,7 +235,8 @@ gradient hero — with no third-party theme or widget dependency.
 | `config` | Print effective configuration |
 | `api` / `gui` | Run the REST API / desktop console |
 
-Global flags: `--config PATH`, `--home PATH`, `--dry-run`.
+Global flags: `--config PATH`, `--home PATH`, `--dry-run`, `--root`,
+`--allow-high-risk`.
 
 ### Exit codes
 

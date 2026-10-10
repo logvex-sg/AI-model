@@ -241,9 +241,31 @@ Edit `~/.aegis/config.toml`, or override with environment variables:
 export KALI_AEGIS_API_PORT=9000
 export KALI_AEGIS_AUTHORIZED_HOSTS="lab.internal,ctf.local"
 export KALI_AEGIS_AUTO_APPROVE_HIGH_RISK=1    # disposable labs only
+export KALI_AEGIS_ALLOW_ROOT=1                # permit sudo/elevated commands
 ```
 
 Precedence: explicit flags → environment → config file → defaults.
+
+### Connecting a model
+
+To enable the reasoning loop, point KALI-AEGIS at any OpenAI-compatible
+endpoint. Without this the assistant still runs, but objectives that need
+reasoning come back `BLOCKED` instead of being attempted.
+
+```bash
+# hosted (DeepSeek shown; openai/groq/together/openrouter/xai/mistral all work)
+export KALI_AEGIS_MODEL_PROVIDER=deepseek
+export KALI_AEGIS_MODEL_NAME=deepseek-chat
+export KALI_AEGIS_MODEL_API_KEY=sk-...
+
+# local, no key needed
+export KALI_AEGIS_MODEL_PROVIDER=ollama
+export KALI_AEGIS_MODEL_NAME=llama3.1
+```
+
+Verify with `aegis doctor` — the `MODEL` row should read `OK`. For any other
+endpoint use `KALI_AEGIS_MODEL_PROVIDER=custom` plus
+`KALI_AEGIS_MODEL_BASE_URL=https://your.host/v1`.
 
 ## Troubleshooting
 

@@ -188,11 +188,31 @@ def run_diagnostics(config: Optional[Config] = None) -> DiagnosticsReport:
     add(Check("ROOT", root_status, root_detail))
 
     if config is not None:
+        from .privilege import PrivilegeManager
+
+        rep = PrivilegeManager(allow_root=config.allow_root).report()
+        add(Check(
+            "ELEVATION",
+            OK if rep.can_elevate else WARN,
+            f"{rep.capability}; allow_root={'on' if rep.allow_root else 'off'}",
+        ))
+
+    if config is not None:
         ks = Killswitch(config)
         engaged = ks.is_engaged()
         add(Check("KILLSWITCH", OK, "ENGAGED" if engaged else "READY"))
-        add(Check("MODEL", OK if config.model_provider != "none" else WARN,
-                  config.model_provider if config.model_provider != "none"
-                  else "no LLM configured; deterministic core only"))
+
+        # Report LLM readiness truthfully: a provider name alone is not enough
+        # — the key and a reachable base URL both have to be present.
+        if config.llm_ready:
+            add(Check("MODEL", OK, f"{config.model_name} via {config.model_provider}"))
+        elif config.model_provider in {"", "none"}:
+            add(Check("MODEL", WARN, "no LLM configured; deterministic core only"))
+        else:
+            add(Check(
+                "MODEL", WARN,
+                f"{config.model_provider} configured but not ready "
+                f"(missing API key in ${config.model_api_key_env}, or no base URL)",
+            ))
 
     return report

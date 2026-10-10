@@ -58,6 +58,13 @@ class RiskDenied(AegisError):
     error_class = ErrorClass.PERMISSION
 
 
+class PrivilegeDenied(AegisError):
+    """An operation needed root but elevation was unavailable or disabled."""
+
+    exit_code = 9
+    error_class = ErrorClass.PERMISSION
+
+
 class CommandError(AegisError):
     """A shell command failed."""
 

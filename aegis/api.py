@@ -73,13 +73,27 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "version": __version__,
                 "killswitch": self.runtime.killswitch.is_engaged(),
+                "llm_available": self.runtime.llm_available,
             },
             "/v1/agents": self.runtime.introspect,
+            "/v1/privilege": lambda: (
+                self.runtime.privileges.report().to_dict()
+                if self.runtime.privileges else {}
+            ),
             "/v1/status": lambda: {
                 "agents": self.runtime.agent_status(),
                 "tasks": len(self.runtime.state.all()),
                 "queue": len(self.runtime.state.queue()),
                 "interrupted": len(self.runtime.state.interrupted()),
+                "llm": {
+                    "provider": self.runtime.config.model_provider,
+                    "model": self.runtime.config.model_name,
+                    "available": self.runtime.llm_available,
+                },
+                "privilege": (
+                    self.runtime.privileges.report().to_dict()
+                    if self.runtime.privileges else {}
+                ),
             },
             "/v1/monitor": self.runtime.monitor,
             "/v1/diagnostics": lambda: self.runtime.diagnostics().to_dict(),

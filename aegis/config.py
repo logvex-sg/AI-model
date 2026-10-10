@@ -46,6 +46,14 @@ class Config:
     model_provider: str = "none"
     model_name: str = "none"
     model_base_url: str = ""
+    #: Env var holding the API key for the provider above.
+    model_api_key_env: str = "KALI_AEGIS_MODEL_API_KEY"
+    #: Sampling and budget for the reasoning loop.
+    model_temperature: float = 0.2
+    model_max_tokens: int = 2048
+    model_timeout: int = 60
+    #: Upper bound on tool-calling iterations for one objective.
+    max_agent_iterations: int = 12
     #: Shell execution policy.
     command_timeout: int = 300
     allow_root: bool = False
@@ -100,10 +108,38 @@ class Config:
         return self._resolve(self.projects_dir)
 
     def write_roots(self) -> List[Path]:
-        """Directories considered writable by the agent."""
+        """Directories considered writable by the agent.
+
+        When ``allow_root`` is on, the filesystem is no longer sandboxed: the
+        whole tree becomes writable. That is intentional — the operator has
+        asked for full machine control — and it is why the audit log records
+        every write regardless of where it lands.
+        """
+        if self.allow_root:
+            return [Path("/")]
         roots = [self.home, self.projects_path]
         roots.extend(Path(p).expanduser() for p in self.allowed_write_paths)
         return roots
+
+    @property
+    def model_api_key(self) -> str:
+        """API key for the configured provider, read from the configured env var."""
+        return os.environ.get(self.model_api_key_env, "")
+
+    @property
+    def llm_ready(self) -> bool:
+        """Whether a usable LLM endpoint is configured."""
+        from .llm import KEYLESS_PROVIDERS, resolve_base_url
+
+        if self.model_provider in {"", "none"}:
+            return False
+        provider = self.model_provider.lower()
+        base = resolve_base_url(provider, self.model_base_url)
+        if not base:
+            return False
+        if provider in KEYLESS_PROVIDERS:
+            return True
+        return bool(self.model_api_key)
 
     def ensure_home(self) -> Path:
         self.home.mkdir(parents=True, exist_ok=True)

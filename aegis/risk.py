@@ -105,7 +105,24 @@ class RiskAssessment:
         }
 
 
-#: Commands that only ever affect a single process, never the host.
+#: Commands that genuinely need root. Kept short and explicit on purpose:
+#: over-reporting "needs root" is how an agent ends up running far more as root
+#: than it meant to, so the list covers only tools that are useless without it.
+_ROOT_COMMANDS = {
+    "apt", "apt-get", "dpkg", "snap", "systemctl", "service", "ufw",
+    "iptables", "nft", "sysctl", "mount", "umount", "fdisk", "parted",
+    "mkfs", "wipefs", "grub-install", "update-grub", "useradd", "userdel",
+    "usermod", "groupadd", "groupdel", "passwd", "chpasswd", "visudo",
+    "reboot", "shutdown", "poweroff", "halt", "init", "crontab", "docker",
+    "podman", "systemd-run",
+}
+
+#: Paths that imply the operation touches privileged files.
+_ROOT_MARKERS = ("/etc/shadow", "/etc/sudoers", "/boot/", "/var/lib/dpkg")
+
+#: Interpreters the model can use as a clean primitive for privileged scripts.
+_SCRIPT_LAUNCHERS = {"python", "python3", "perl", "ruby", "node", "bash", "sh"}
+
 _CATEGORY_BY_RISK = {
     Risk.LOW: "diagnostic",
     Risk.MEDIUM: "system-change",
@@ -133,11 +150,28 @@ def _first_word(command: str) -> str:
     return parts[idx].rsplit("/", 1)[-1]
 
 
+def _needs_root(tool: str, lowered: str, parts: "List[str]") -> bool:
+    """Whether this command genuinely needs root.
+
+    Covers three cases: an explicit ``sudo``/``doas``, a tool that is useless
+    without root, or an operation touching a privileged path.
+    """
+    if "sudo" in parts or "doas" in parts:
+        return True
+    if tool in _ROOT_COMMANDS:
+        return True
+    return any(marker in lowered for marker in _ROOT_MARKERS)
+
+
 def classify(command: str, *, base: Optional[Risk] = None) -> RiskAssessment:
     """Classify a shell command string."""
     tool = _first_word(command)
     lowered = command.lower()
-    needs_root = "sudo" in lowered.split() or lowered.startswith("sudo ")
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    needs_root = _needs_root(tool, lowered, parts)
     irreversible = tool in _IRREVERSIBLE
 
     def verdict(

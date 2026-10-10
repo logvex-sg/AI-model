@@ -1,25 +1,27 @@
-"""Desktop console — a frosted-glass AI assistant surface (Tkinter).
+"""Desktop console — a liquid-glass AI assistant surface (Tkinter).
 
-This is a conversation-first interface, not an admin table. You type an
-objective, an agent team works on it, and the thread shows what each agent is
-doing in plain language while raw commands stay tucked inside their own mono
-cards. The glass aesthetic is built from layered translucent panels, hairline
-borders, and a soft gradient hero — no external theme, no third-party widgets.
+Conversation-first, Codex-style: you describe an objective, the reasoning loop
+works on it with real tools, and the thread streams what is happening. Raw
+commands and file output stay inside their own monospace cards so the prose
+stays readable.
 
-Tkinter ships with CPython but needs the system Tk libraries. When they are
-missing :func:`launch` reports a precise, actionable error and exits non-zero
-instead of crashing with an opaque import failure.
+The glass is composited by :mod:`aegis.liquid` — an animated liquid background,
+frosted panels with lit top bevels, and a specular sweep across the hero.
+
+Threading note: the objective runs on a worker thread, which must never touch a
+widget. It hands its result to the main loop through a queue that ``_tick()``
+drains. Calling ``after()`` from the worker raises
+``main thread is not in main loop``.
 """
 
 from __future__ import annotations
 
-import platform
 import queue
 import sys
 import threading
-import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from . import liquid as L
 from .config import Config
 from .orchestrator import Runtime
 from .security.scope import local_addresses
@@ -32,1058 +34,794 @@ _TK_HELP = (
     "Then re-run `aegis gui`."
 )
 
-# --------------------------------------------------------------------------- #
-# palette — deep space base, frosted translucent panels, restrained accents
-# --------------------------------------------------------------------------- #
-_VOID = "#04060c"          # behind everything
-_BASE = "#080c16"          # app background
-_GLASS = "#0f1626"         # primary frosted panel
-_GLASS_LO = "#0b111d"      # sunken surface (code blocks)
-_HAIR = "#1e2a42"          # hairline border
-_HAIR_HI = "#2c3d5c"       # hairline on raised
-_FG = "#e9effb"            # primary text
-_FG2 = "#9dafcb"           # secondary text
-_FG3 = "#5f7091"           # tertiary / captions
-_BLUE = "#63a4ff"
-_CYAN = "#57d9e8"
-_GREEN = "#5ce08d"
-_AMBER = "#f2b455"
-_RED = "#ff6f6f"
-_VIOLET = "#a98bff"
-
-_STATE_COLOR = {
-    "IDLE": _FG3,
-    "THINKING": _BLUE,
-    "PLANNING": _VIOLET,
-    "EXECUTING": _GREEN,
-    "TESTING": _AMBER,
-    "WAITING": _CYAN,
-    "ERROR": _RED,
-    "STOPPED": _RED,
+_STATE_COLOR: Dict[str, L.RGB] = {
+    "IDLE": L.TEXT_FAINT,
+    "THINKING": L.ACCENT,
+    "PLANNING": L.ACCENT_WARM,
+    "EXECUTING": L.ACCENT_GREEN,
+    "TESTING": L.ACCENT_AMBER,
+    "WAITING": L.ACCENT,
+    "ERROR": L.ACCENT_RED,
+    "STOPPED": L.ACCENT_RED,
 }
-
-_STATUS_COLOR = {
-    "COMPLETE": _GREEN,
-    "RUNNING": _BLUE,
-    "PENDING": _FG3,
-    "BLOCKED": _AMBER,
-    "INTERRUPTED": _AMBER,
-    "FAILED": _RED,
-}
-
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _VIEWS = [
-    ("thread", "◍", "Thread"),
-    ("team", "◈", "Team"),
-    ("tasks", "▤", "Tasks"),
-    ("security", "⛨", "Security"),
-    ("logs", "≡", "Audit"),
-    ("settings", "⚙", "Settings"),
+    ("thread", "Thread", "your conversation with the team"),
+    ("team", "Team", "each agent's self-model"),
+    ("tasks", "Tasks", "objectives and their state"),
+    ("security", "Security", "authorized scope and posture"),
+    ("audit", "Audit", "append-only operation log"),
+    ("settings", "Settings", "effective configuration"),
 ]
-
-_SUGGESTIONS = [
-    "Create a Python network monitor, test it, and init a git repo",
-    "Scan 127.0.0.1 and report open services",
-    "Explain what the executor agent can and cannot do",
-]
-
-
-def _import_tk():
-    try:
-        import tkinter as tk
-        from tkinter import font as tkfont
-    except ImportError as exc:  # pragma: no cover - depends on host libs
-        raise RuntimeError(f"{_TK_HELP}\n\nunderlying error: {exc}") from exc
-    return tk, tkfont
-
-
-def _hex_to_rgb(color: str):
-    return tuple(int(color[i : i + 2], 16) for i in (1, 3, 5))
-
-
-def _lerp(c1: str, c2: str, t: float) -> str:
-    a, b = _hex_to_rgb(c1), _hex_to_rgb(c2)
-    return "#%02x%02x%02x" % tuple(
-        int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3)
-    )
-
-
-def _blend(fg: str, bg: str, alpha: float) -> str:
-    """Fake translucency: mix ``fg`` into ``bg`` at ``alpha``."""
-    return _lerp(bg, fg, alpha)
 
 
 class GlassApp:
-    """The frosted-glass assistant console."""
+    """The console window."""
 
-    def __init__(self, runtime: Runtime) -> None:
+    WIDTH = 1440
+    HEIGHT = 900
+    RAIL_W = 208
+    SIDE_W = 244
+
+    def __init__(self, runtime: Runtime, config: Optional[Config] = None) -> None:
+        import tkinter as tk
+
+        self.tk = tk
         self.runtime = runtime
-        self.tk, self.tkfont = _import_tk()
-        self.root = self.tk.Tk()
+        self.config = config or runtime.config
+
+        self.root = tk.Tk()
         self.root.title("KALI-AEGIS")
-        self.root.geometry("1180x780")
-        self.root.minsize(940, 620)
-        self.root.configure(bg=_BASE)
+        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.root.minsize(1100, 680)
+        self.root.configure(bg=L.to_hex(L.BACKGROUND_TOP))
 
         self._view = "thread"
         self._busy = False
-        self._spin = 0
-        self._kill_cache: Optional[bool] = None
-        self._agent_rows: Dict[str, Any] = {}
-        self._rail_btns: Dict[str, Any] = {}
-        self._thread_win: Optional[Any] = None
-        self._thread_inner: Optional[Any] = None
-        self._activity: Optional[Any] = None
-        self._spin_lbl: Optional[Any] = None
-        self._entry: Optional[Any] = None
-        self._results: "queue.Queue[Any]" = queue.Queue()
         self._turns: List[Dict[str, Any]] = []
+        self._results: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+        self._agent_rows: Dict[str, Dict[str, Any]] = {}
+        self._nav_buttons: Dict[str, Any] = {}
+        self._phase = 0.0
+        self._after_id: Optional[str] = None
 
-        self._pick_fonts()
-        self._build()
-        self._render_view()
+        self._build_background()
+        self._build_shell()
+        self._show("thread")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._tick()
 
-    # -- fonts ---------------------------------------------------------------
-    def _pick_fonts(self) -> None:
-        available = set(self.tkfont.families())
-
-        def pick(candidates: List[str], fallback: str = "TkDefaultFont") -> str:
-            for name in candidates:
-                if name in available:
-                    return name
-            return fallback
-
-        self.f_display = pick(
-            ["JetBrains Mono", "IBM Plex Mono", "DejaVu Sans Mono", "Menlo",
-             "Consolas", "monospace"]
+    # ------------------------------------------------------------------ #
+    # background glass
+    # ------------------------------------------------------------------ #
+    def _build_background(self) -> None:
+        tk = self.tk
+        self.canvas = tk.Canvas(
+            self.root, width=self.WIDTH, height=self.HEIGHT,
+            highlightthickness=0, bd=0, bg=L.to_hex(L.BACKGROUND_TOP),
         )
-        self.f_ui = pick(
-            ["Inter", "IBM Plex Sans", "Cantarell", "DejaVu Sans", "Segoe UI",
-             "Helvetica"]
+        self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self.liquid = L.LiquidBackground(self.canvas, self.WIDTH, self.HEIGHT)
+        self.liquid.paint_static()
+        self.liquid.paint_blobs()
+        self.root.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, event) -> None:
+        if event.widget is not self.root:
+            return
+        self.liquid.width = event.width
+        self.liquid.height = event.height
+        self.canvas.configure(width=event.width, height=event.height)
+        self.liquid.paint_static()
+        self.liquid.paint_blobs()
+
+    # ------------------------------------------------------------------ #
+    # shell layout
+    # ------------------------------------------------------------------ #
+    def _panel(self, parent, tint, alpha):
+        """A frosted Frame: blended fill plus a lit 1px top bevel."""
+        tk = self.tk
+        bg = L.to_hex(L.blend(L.BACKGROUND_BOTTOM, tint, alpha))
+        frame = tk.Frame(parent, bg=bg)
+        bevel = tk.Frame(frame, bg=L.to_hex(L.BEVEL_TOP), height=1)
+        bevel.pack(fill="x", side="top")
+        body = tk.Frame(frame, bg=bg)
+        body.pack(fill="both", expand=True)
+        frame.body = body  # type: ignore[attr-defined]
+        frame.bg = bg  # type: ignore[attr-defined]
+        return frame
+
+    def _build_shell(self) -> None:
+        self.left = self._panel(self.root, L.SURFACE_HIGH, 0.62)
+        self.left.place(x=14, y=14, width=self.RAIL_W, relheight=1.0, height=-28)
+
+        self.center = self._panel(self.root, L.SURFACE_HIGH, 0.5)
+        self.center.place(
+            x=self.RAIL_W + 28, y=14,
+            relwidth=1.0, width=-(self.RAIL_W + self.SIDE_W + 56),
+            relheight=1.0, height=-28,
         )
-        self.f_mono = self.f_display
 
-    def F(self, family: str, size: int, weight: str = "normal") -> tuple:
-        return (family, size, weight)
+        self.right = self._panel(self.root, L.SURFACE_HIGH, 0.58)
+        self.right.place(relx=1.0, x=-(self.SIDE_W + 14), y=14, width=self.SIDE_W,
+                         relheight=1.0, height=-28)
 
-    # -- public entry points (used by tests) ---------------------------------
-    def _show(self, view: str) -> None:
-        self._view = view
-        self._render_view()
+        self._build_nav(self.left.body)
+        self._build_center(self.center.body)
+        self._build_side(self.right.body)
 
-    def refresh(self) -> None:
-        self._render_view()
-        self._refresh_agent_rail()
+    # -- left rail ------------------------------------------------------ #
+    def _build_nav(self, parent) -> None:
+        tk = self.tk
+        bg = parent.cget("bg")
+        head = tk.Frame(parent, bg=bg)
+        head.pack(fill="x", padx=16, pady=(18, 6))
 
-    def _engage_kill(self) -> None:
-        self.runtime.killswitch.engage("desktop console")
-        self.refresh()
+        row = tk.Frame(head, bg=bg)
+        row.pack(fill="x")
+        mark = tk.Canvas(row, width=30, height=30, highlightthickness=0, bd=0, bg=bg)
+        mark.pack(side="left")
+        L.radial_blob(mark, 15, 15, 15, L.ACCENT, intensity=0.55, rings=8)
+        mark.create_oval(7, 7, 23, 23, outline=L.to_hex(L.ACCENT), width=2)
+        mark.create_oval(12, 12, 18, 18, fill=L.to_hex(L.ACCENT), outline="")
 
-    def _release_kill(self) -> None:
-        self.runtime.killswitch.release()
-        self.refresh()
+        title = tk.Frame(row, bg=bg)
+        title.pack(side="left", padx=(10, 0))
+        tk.Label(title, text="KALI-AEGIS", bg=bg, fg=L.to_hex(L.TEXT),
+                 font=L.ui_font(12, "bold")).pack(anchor="w")
+        tk.Label(title, text="security engineering", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                 font=L.ui_font(8)).pack(anchor="w")
 
-    # -- layout --------------------------------------------------------------
-    def _build(self) -> None:
-        shell = self.tk.Frame(self.root, bg=_BASE)
-        shell.pack(fill="both", expand=True)
-
-        self._build_rail(shell)
-
-        body = self.tk.Frame(shell, bg=_BASE)
-        body.pack(side="left", fill="both", expand=True)
-
-        self._build_topbar(body)
-
-        stage = self.tk.Frame(body, bg=_BASE)
-        stage.pack(fill="both", expand=True, padx=18, pady=(6, 0))
-
-        self._build_agents_rail(stage)
-
-        self.content = self.tk.Frame(stage, bg=_BASE)
-        self.content.pack(side="left", fill="both", expand=True, padx=(16, 0))
-
-        self._build_statusbar(body)
-
-    # .. left icon rail .......................................................
-    def _build_rail(self, parent: Any) -> None:
-        rail = self.tk.Frame(parent, bg=_VOID, width=68)
-        rail.pack(side="left", fill="y")
-        rail.pack_propagate(False)
-
-        mark = self.tk.Canvas(
-            rail, width=40, height=40, bg=_VOID, highlightthickness=0, bd=0
-        )
-        mark.pack(pady=(18, 10))
-        self._round_rect(mark, 2, 2, 38, 38, 11, fill=_blend(_BLUE, _VOID, 0.16),
-                         outline=_blend(_BLUE, _VOID, 0.45))
-        mark.create_text(20, 21, text="Λ", fill=_BLUE,
-                         font=self.F(self.f_display, 17, "bold"))
-
-        for key, glyph, _label in _VIEWS:
-            btn = self.tk.Label(
-                rail, text=glyph, bg=_VOID, fg=_FG3,
-                font=self.F(self.f_display, 16), cursor="hand2",
+        self._nav_buttons.clear()
+        for key, label, _ in _VIEWS:
+            btn = tk.Label(
+                parent, text=f"  {label}", anchor="w", cursor="hand2",
+                bg=bg, fg=L.to_hex(L.TEXT_DIM), font=L.ui_font(11), padx=10, pady=7,
             )
-            btn.pack(pady=9)
+            btn.pack(fill="x", padx=10, pady=1)
             btn.bind("<Button-1>", lambda _e, k=key: self._show(k))
-            self._rail_btns[key] = btn
+            btn.bind("<Enter>", lambda _e, b=btn: b.configure(fg=L.to_hex(L.TEXT)))
+            btn.bind("<Leave>", lambda _e: self._paint_nav())
+            self._nav_buttons[key] = btn
 
-        spacer = self.tk.Frame(rail, bg=_VOID)
-        spacer.pack(fill="both", expand=True)
+        tk.Frame(parent, bg=bg).pack(fill="both", expand=True)
 
-        self.rail_kill = self.tk.Label(
-            rail, text="⏻", bg=_VOID, fg=_FG3,
-            font=self.F(self.f_display, 16), cursor="hand2",
-        )
-        self.rail_kill.pack(pady=(0, 18))
-        self.rail_kill.bind("<Button-1>", lambda _e: self._toggle_kill())
-
-    # .. top bar ..............................................................
-    def _build_topbar(self, parent: Any) -> None:
-        bar = self.tk.Frame(parent, bg=_BASE, height=58)
-        bar.pack(fill="x")
-        bar.pack_propagate(False)
-
-        left = self.tk.Frame(bar, bg=_BASE)
-        left.pack(side="left", padx=(20, 0))
-        self.tk.Label(
-            left, text="KALI-AEGIS", bg=_BASE, fg=_FG,
-            font=self.F(self.f_ui, 15, "bold"),
-        ).pack(anchor="w", pady=(12, 0))
-        self.top_sub = self.tk.Label(
-            left, text="autonomous security engineering", bg=_BASE, fg=_FG3,
-            font=self.F(self.f_ui, 9),
-        )
-        self.top_sub.pack(anchor="w")
-
-        right = self.tk.Frame(bar, bg=_BASE)
-        right.pack(side="right", padx=(0, 20))
-        self.status_pill = self._pill(right, "● READY", _GREEN, 11, bold=True)
-        self.status_pill.pack(side="right", pady=20)
-        self.kill_pill = self._pill(right, "KILLSWITCH ARMED", _FG3, 9)
-        self.kill_pill.pack(side="right", padx=(0, 10), pady=20)
-
-    # .. right agent rail .....................................................
-    def _build_agents_rail(self, parent: Any) -> None:
-        card = self.tk.Frame(parent, bg=_GLASS, width=252,
-                             highlightthickness=1, highlightbackground=_HAIR)
-        card.pack(side="right", fill="y", pady=(8, 12))
-        card.pack_propagate(False)
-
-        head = self.tk.Frame(card, bg=_GLASS)
-        head.pack(fill="x", padx=16, pady=(16, 10))
-        self.tk.Label(
-            head, text="AGENT TEAM", bg=_GLASS, fg=_FG3,
-            font=self.F(self.f_ui, 8, "bold"),
-        ).pack(side="left")
-        self.team_count = self.tk.Label(
-            head, text="4", bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 9)
-        )
-        self.team_count.pack(side="right")
-
-        self.team_body = self.tk.Frame(card, bg=_GLASS)
-        self.team_body.pack(fill="both", expand=True, padx=10)
-
-        foot = self.tk.Frame(card, bg=_GLASS)
-        foot.pack(fill="x", padx=16, pady=(6, 14))
-        self.queue_lbl = self.tk.Label(
-            foot, text="queue 0", bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 8)
-        )
-        self.queue_lbl.pack(side="left")
-        self.err_lbl = self.tk.Label(
-            foot, text="errors 0", bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 8)
-        )
-        self.err_lbl.pack(side="right")
-
-    # .. status bar ...........................................................
-    def _build_statusbar(self, parent: Any) -> None:
-        bar = self.tk.Frame(parent, bg=_BASE, height=30)
-        bar.pack(fill="x", side="bottom")
-        bar.pack_propagate(False)
-        self.hint = self.tk.Label(
-            bar, text="", bg=_BASE, fg=_FG3, font=self.F(self.f_display, 8)
-        )
-        self.hint.pack(side="left", padx=20)
-        self.home_lbl = self.tk.Label(
-            bar, text=str(self.runtime.config.home), bg=_BASE, fg=_FG3,
-            font=self.F(self.f_display, 8),
-        )
-        self.home_lbl.pack(side="right", padx=20)
-
-    # -- view routing --------------------------------------------------------
-    def _render_view(self) -> None:
-        for child in self.content.winfo_children():
-            child.destroy()
-        self._thread_win = None
-        self._thread_inner = None
-        self._activity = None
-
-        for key, btn in self._rail_btns.items():
-            btn.configure(fg=_BLUE if key == self._view else _FG3)
-
-        renderer: Callable[[Any], None] = {
-            "thread": self._view_thread,
-            "team": self._view_team,
-            "tasks": self._view_tasks,
-            "security": self._view_security,
-            "logs": self._view_logs,
-            "settings": self._view_settings,
-        }[self._view]
-        renderer(self.content)
-
-    # .. thread (the main assistant surface) .................................
-    def _view_thread(self, parent: Any) -> None:
-        frame = self.tk.Frame(parent, bg=_BASE)
-        frame.pack(fill="both", expand=True)
-
-        scroll, inner = self._scrollframe(frame)
-        scroll.pack(fill="both", expand=True, pady=(8, 0))
-        self._thread_win = scroll
-        self._thread_inner = inner
-
-        if not self._turns:
-            self._render_hero(inner)
-        for turn in self._turns:
-            self._render_turn(inner, turn)
-
-        self._build_composer(frame)
-
-    def _render_hero(self, parent: Any) -> None:
-        hero = self.tk.Canvas(parent, height=196, bg=_BASE,
-                              highlightthickness=0, bd=0)
-        hero.pack(fill="x", pady=(10, 6))
-        hero.bind("<Configure>", lambda e: self._paint_hero(hero, e.width))
-
-    def _paint_hero(self, canvas: Any, width: int) -> None:
-        canvas.delete("all")
-        width = max(width, 200)
-        top = _lerp(_BASE, _BLUE, 0.10)
-        for y in range(196):
-            canvas.create_line(0, y, width, y, fill=_lerp(top, _BASE, y / 195))
-
-        pad = 26
-        canvas.create_text(
-            pad, 58, anchor="w", text="What should we work on?",
-            fill=_FG, font=self.F(self.f_ui, 22, "bold"),
-        )
-        canvas.create_text(
-            pad, 88, anchor="w",
-            text="Describe an objective. The team breaks it down, executes what it "
-                 "can, and reports honestly what it cannot.",
-            fill=_FG2, font=self.F(self.f_ui, 10), width=width - pad * 2,
-        )
-
-        x = pad
-        for glyph, label, color in [
-            ("◈", "4 agents", _VIOLET),
-            ("⛨", "scope enforced", _GREEN),
-            ("⏻", "killswitch", _AMBER),
-            ("≡", "audited", _CYAN),
-        ]:
-            w = 12 + 13 * len(label)
-            self._round_rect(canvas, x, 122, x + w, 148, 13,
-                             fill=_blend(color, _BASE, 0.10),
-                             outline=_blend(color, _BASE, 0.34))
-            canvas.create_text(x + 11, 135, anchor="w", text=glyph, fill=color,
-                               font=self.F(self.f_display, 9))
-            canvas.create_text(x + 24, 135, anchor="w", text=label, fill=_FG2,
-                               font=self.F(self.f_ui, 9))
-            x += w + 8
-
-        y = 168
-        for text in _SUGGESTIONS[:2]:
-            canvas.create_text(
-                pad, y, anchor="w", text="›  " + text, fill=_FG3,
-                font=self.F(self.f_display, 9), width=width - pad * 2,
-            )
-            y += 16
-
-    def _build_composer(self, parent: Any) -> None:
-        shell = self.tk.Frame(parent, bg=_GLASS, highlightthickness=1,
-                              highlightbackground=_HAIR_HI)
-        shell.pack(fill="x", pady=(12, 14))
-
-        inner = self.tk.Frame(shell, bg=_GLASS)
-        inner.pack(fill="x", padx=12, pady=10)
-
-        self.prompt_lbl = self.tk.Label(
-            inner, text="›", bg=_GLASS, fg=_BLUE,
-            font=self.F(self.f_display, 15, "bold"),
-        )
-        self.prompt_lbl.pack(side="left", padx=(2, 8), anchor="n", pady=(4, 0))
-
-        self.entry = self.tk.Text(
-            inner, height=2, bg=_GLASS, fg=_FG, insertbackground=_BLUE,
-            font=self.F(self.f_ui, 11), bd=0, highlightthickness=0,
-            wrap="word", padx=2, pady=4,
-        )
-        self.entry.pack(side="left", fill="both", expand=True)
-        self._entry = self.entry
-        self.entry.bind("<Return>", self._on_return)
-        self.entry.bind("<Shift-Return>", lambda _e: None)
-
-        send = self.tk.Label(
-            inner, text="  ↑  ", bg=_blend(_BLUE, _GLASS, 0.22), fg=_FG,
-            font=self.F(self.f_display, 13, "bold"), cursor="hand2", padx=6, pady=4,
-        )
-        send.pack(side="right", padx=(8, 2), anchor="s")
-        send.bind("<Button-1>", lambda _e: self._submit())
-
-        self.composer_hint = self.tk.Label(
-            shell, text="Enter to send  ·  Shift+Enter for a new line  ·  commands run "
-                        "through the risk policy and audit log",
-            bg=_GLASS, fg=_FG3, font=self.F(self.f_ui, 8),
-        )
-        self.composer_hint.pack(anchor="w", padx=16, pady=(0, 10))
-
-    # .. render a turn .......................................................
-    def _render_turn(self, parent: Any, turn: Dict[str, Any]) -> None:
-        if turn["kind"] == "user":
-            self._render_user(parent, turn)
-        else:
-            self._render_assistant(parent, turn)
-
-    def _render_user(self, parent: Any, turn: Dict[str, Any]) -> None:
-        row = self.tk.Frame(parent, bg=_BASE)
-        row.pack(fill="x", pady=(14, 2))
-
-        bar = self.tk.Frame(row, bg=_BLUE, width=3)
-        bar.pack(side="left", fill="y", pady=2)
-
-        body = self.tk.Frame(row, bg=_BASE)
-        body.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        self.tk.Label(
-            body, text="YOU", bg=_BASE, fg=_FG3,
-            font=self.F(self.f_ui, 8, "bold"),
-        ).pack(anchor="w")
-        lbl = self.tk.Label(
-            body, text=turn["text"], bg=_BASE, fg=_FG,
-            font=self.F(self.f_ui, 12), justify="left", anchor="w",
-        )
-        lbl.pack(anchor="w", pady=(2, 0))
-        self._bind_wrap(lbl, self._thread_win, pad=90)
-
-    def _render_assistant(self, parent: Any, turn: Dict[str, Any]) -> None:
-        row = self.tk.Frame(parent, bg=_BASE)
-        row.pack(fill="x", pady=(10, 4))
-
-        body = self.tk.Frame(row, bg=_BASE)
-        body.pack(fill="x", expand=True)
-
-        head = self.tk.Frame(body, bg=_BASE)
-        head.pack(fill="x")
-        self.tk.Label(
-            head, text="KALI-AEGIS", bg=_BASE, fg=_BLUE,
-            font=self.F(self.f_ui, 9, "bold"),
-        ).pack(side="left")
-        if turn.get("status"):
-            color = _STATUS_COLOR.get(turn["status"], _FG3)
-            self._pill(head, "  " + turn["status"] + "  ", color, 8,
-                       bold=True).pack(side="left", padx=8)
-
-        report = turn.get("report")
-        if report is None:
-            msg = self.tk.Label(
-                body, text=turn.get("text", ""), bg=_BASE, fg=_FG2,
-                font=self.F(self.f_ui, 10), justify="left", anchor="w",
-            )
-            msg.pack(anchor="w", pady=(6, 0))
-            self._bind_wrap(msg, self._thread_win, 60)
-            return
-
-        self._render_report(body, report)
-
-    def _render_report(self, parent: Any, report: Dict[str, Any]) -> None:
-        verification = report.get("VERIFICATION", "")
-        if verification:
-            lbl = self.tk.Label(
-                parent, text=verification, bg=_BASE, fg=_FG2,
-                font=self.F(self.f_ui, 10), justify="left", anchor="w",
-            )
-            lbl.pack(anchor="w", pady=(6, 0))
-            self._bind_wrap(lbl, self._thread_win, 60)
-
-        objective = report.get("OBJECTIVE")
-        if objective:
-            self._kv(parent, "Objective", objective)
-
-        steps = report.get("PLAN") or []
-        if steps:
-            self._step_list(parent, steps)
-
-        results = report.get("RESULTS") or []
-        if results:
-            self._section(parent, "ACTIVITY", [
-                (r, _GREEN if "BLOCK" not in r.upper() else _AMBER)
-                for r in results
-            ])
-
-        for cmd in report.get("COMMANDS EXECUTED") or []:
-            self._command_card(parent, cmd)
-
-        errors = report.get("ERRORS") or []
-        if errors:
-            self._section(parent, "ERRORS", [(e, _RED) for e in errors])
-
-        files = report.get("FILES CHANGED") or []
-        if files:
-            self._section(parent, "FILES CHANGED", [(f, _CYAN) for f in files])
-
-        next_action = report.get("NEXT ACTION")
-        if next_action and next_action != "none":
-            self._kv(parent, "Next action", next_action, accent=_AMBER)
-
-    def _section(self, parent: Any, title: str, items: List[tuple]) -> None:
-        wrap = self.tk.Frame(parent, bg=_BASE)
-        wrap.pack(fill="x", pady=(10, 0))
-        self.tk.Label(
-            wrap, text=title, bg=_BASE, fg=_FG3,
-            font=self.F(self.f_ui, 8, "bold"),
-        ).pack(anchor="w", pady=(0, 3))
-        for text, color in items:
-            line = self.tk.Frame(wrap, bg=_BASE)
-            line.pack(fill="x", pady=1)
-            self.tk.Label(
-                line, text="•", bg=_BASE, fg=color,
-                font=self.F(self.f_display, 9),
-            ).pack(side="left", padx=(2, 8), anchor="n")
-            lbl = self.tk.Label(
-                line, text=str(text), bg=_BASE, fg=_FG2,
-                font=self.F(self.f_ui, 10), justify="left", anchor="w",
-            )
-            lbl.pack(side="left", fill="x", expand=True)
-            self._bind_wrap(lbl, self._thread_win, 120)
-
-    def _step_list(self, parent: Any, steps: List[Dict[str, Any]]) -> None:
-        wrap = self.tk.Frame(parent, bg=_BASE)
-        wrap.pack(fill="x", pady=(10, 0))
-        self.tk.Label(
-            wrap, text="PLAN", bg=_BASE, fg=_FG3,
-            font=self.F(self.f_ui, 8, "bold"),
-        ).pack(anchor="w", pady=(0, 4))
-
-        for idx, step in enumerate(steps, 1):
-            row = self.tk.Frame(wrap, bg=_BASE)
-            row.pack(fill="x", pady=2)
-            self.tk.Label(
-                row, text=f"{idx:02d}", bg=_BASE, fg=_FG3,
-                font=self.F(self.f_display, 9),
-            ).pack(side="left", padx=(2, 10), anchor="n")
-            lbl = self.tk.Label(
-                row, text=step.get("description", ""), bg=_BASE, fg=_FG2,
-                font=self.F(self.f_ui, 10), justify="left", anchor="w",
-            )
-            lbl.pack(side="left", fill="x", expand=True)
-            self._bind_wrap(lbl, self._thread_win, 150)
-            agent = step.get("agent", "")
-            color = _VIOLET if agent == "leader" else _BLUE
-            self._pill(row, " " + agent + " ", color, 8).pack(side="right")
-
-    def _command_card(self, parent: Any, command: str) -> None:
-        card = self.tk.Frame(parent, bg=_GLASS_LO, highlightthickness=1,
-                             highlightbackground=_HAIR)
-        card.pack(fill="x", pady=(8, 0))
-        head = self.tk.Frame(card, bg=_GLASS_LO)
-        head.pack(fill="x", padx=12, pady=(8, 0))
-        self.tk.Label(
-            head, text="COMMAND", bg=_GLASS_LO, fg=_FG3,
-            font=self.F(self.f_ui, 7, "bold"),
-        ).pack(side="left")
-        body = self.tk.Frame(card, bg=_GLASS_LO)
-        body.pack(fill="x", padx=12, pady=(4, 10))
-        self.tk.Label(
-            body, text="$", bg=_GLASS_LO, fg=_GREEN,
-            font=self.F(self.f_mono, 10, "bold"),
-        ).pack(side="left", padx=(0, 8), anchor="n")
-        lbl = self.tk.Label(
-            body, text=command, bg=_GLASS_LO, fg=_FG,
-            font=self.F(self.f_mono, 10), justify="left", anchor="w",
-        )
-        lbl.pack(side="left", fill="x", expand=True)
-        self._bind_wrap(lbl, self._thread_win, 150)
-
-    def _kv(self, parent: Any, key: str, value: str,
-            accent: str = _FG3) -> None:
-        wrap = self.tk.Frame(parent, bg=_BASE)
-        wrap.pack(fill="x", pady=(10, 0))
-        self.tk.Label(
-            wrap, text=key.upper(), bg=_BASE, fg=accent,
-            font=self.F(self.f_ui, 8, "bold"),
-        ).pack(anchor="w", pady=(0, 2))
-        lbl = self.tk.Label(
-            wrap, text=value, bg=_BASE, fg=_FG2,
-            font=self.F(self.f_ui, 10), justify="left", anchor="w",
-        )
-        lbl.pack(anchor="w")
-        self._bind_wrap(lbl, self._thread_win, 70)
-
-    # -- activity row (streaming feel) ---------------------------------------
-    def _show_activity(self, agent: str, action: str) -> None:
-        if self._thread_inner is None:
-            return
-        if self._activity is not None:
-            self._activity.destroy()
-        row = self.tk.Frame(self._thread_inner, bg=_BASE)
-        row.pack(fill="x", pady=(10, 0))
-        self._spin_lbl = self.tk.Label(
-            row, text=_SPINNER[0], bg=_BASE, fg=_BLUE,
-            font=self.F(self.f_display, 11),
-        )
-        self._spin_lbl.pack(side="left", padx=(2, 8))
-        self.tk.Label(
-            row, text=f"{agent} is {action}", bg=_BASE, fg=_FG2,
-            font=self.F(self.f_ui, 10),
-        ).pack(side="left")
-        self._activity = row
-        self._scroll_bottom()
-
-    def _clear_activity(self) -> None:
-        if self._activity is not None:
-            self._activity.destroy()
-            self._activity = None
-
-    # -- other views ---------------------------------------------------------
-    def _view_team(self, parent: Any) -> None:
-        self._page_title(parent, "Team", "What each agent can and cannot do.")
-        for model in self.runtime.introspect()["team"]:
-            card = self._card(parent)
-            head = self.tk.Frame(card, bg=_GLASS)
-            head.pack(fill="x", padx=18, pady=(16, 4))
-            self.tk.Label(
-                head, text=model["name"].upper(), bg=_GLASS, fg=_FG,
-                font=self.F(self.f_ui, 12, "bold"),
-            ).pack(side="left")
-            color = _RED if model["status"] == "STOPPED" else _GREEN
-            self._pill(head, " " + model["status"] + " ", color, 8,
-                       bold=True).pack(side="right")
-            self.tk.Label(
-                card, text=model["role"], bg=_GLASS, fg=_FG2,
-                font=self.F(self.f_ui, 10),
-            ).pack(anchor="w", padx=18)
-
-            grid = self.tk.Frame(card, bg=_GLASS)
-            grid.pack(fill="x", padx=18, pady=(10, 4))
-            self._chips(grid, "CAPABILITIES", model["capabilities"], _GREEN)
-            self._chips(grid, "LIMITATIONS", model["limitations"], _AMBER)
-
-            foot = self.tk.Frame(card, bg=_GLASS)
-            foot.pack(fill="x", padx=18, pady=(6, 16))
-            self.tk.Label(
-                foot, text=f"{len(model['implemented_actions'])} implemented actions",
-                bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 8),
-            ).pack(side="left")
-            if model["requires_llm"]:
-                self.tk.Label(
-                    foot, text="requires LLM", bg=_GLASS, fg=_AMBER,
-                    font=self.F(self.f_display, 8),
-                ).pack(side="right")
-
-    def _chips(self, parent: Any, title: str, items: List[str], color: str) -> None:
-        wrap = self.tk.Frame(parent, bg=_GLASS)
-        wrap.pack(fill="x", pady=3)
-        self.tk.Label(
-            wrap, text=title, bg=_GLASS, fg=_FG3,
-            font=self.F(self.f_ui, 7, "bold"),
-        ).pack(side="left", padx=(0, 10), anchor="n", pady=(3, 0))
-        box = self.tk.Frame(wrap, bg=_GLASS)
-        box.pack(side="left", fill="x", expand=True)
-        for item in items:
-            self._pill(box, " " + item + " ",
-                       _blend(color, _GLASS, 0.9), 8,
-                       bg=_blend(color, _GLASS, 0.13)).pack(side="left",
-                                                             padx=2, pady=1)
-
-    def _view_tasks(self, parent: Any) -> None:
-        self._page_title(parent, "Tasks", "Objectives this session and their status.")
-        tasks = self.runtime.state.all()
-        if not tasks:
-            self._empty(parent, "No tasks yet. Describe an objective in the Thread view.")
-            return
-        for task in reversed(tasks):
-            card = self._card(parent)
-            head = self.tk.Frame(card, bg=_GLASS)
-            head.pack(fill="x", padx=18, pady=(14, 2))
-            self.tk.Label(
-                head, text=task.id, bg=_GLASS, fg=_FG3,
-                font=self.F(self.f_display, 9),
-            ).pack(side="left")
-            color = _STATUS_COLOR.get(task.status, _FG3)
-            self._pill(head, " " + task.status + " ", color, 8,
-                       bold=True).pack(side="right")
-            lbl = self.tk.Label(
-                card, text=task.objective, bg=_GLASS, fg=_FG,
-                font=self.F(self.f_ui, 10), justify="left", anchor="w",
-            )
-            lbl.pack(anchor="w", padx=18, pady=(0, 6))
-            self._bind_wrap(lbl, self.content, 260)
-
-            if task.subtasks:
-                box = self.tk.Frame(card, bg=_GLASS)
-                box.pack(fill="x", padx=18, pady=(0, 14))
-                for sub in task.subtasks:
-                    row = self.tk.Frame(box, bg=_GLASS)
-                    row.pack(fill="x", pady=1)
-                    dot_color = _STATUS_COLOR.get(sub.status, _FG3)
-                    self.tk.Label(
-                        row, text="●", bg=_GLASS, fg=dot_color,
-                        font=self.F(self.f_display, 8),
-                    ).pack(side="left", padx=(0, 8))
-                    self.tk.Label(
-                        row, text=sub.description, bg=_GLASS, fg=_FG2,
-                        font=self.F(self.f_ui, 9),
-                    ).pack(side="left")
-                    self._pill(row, " " + sub.agent + " ", _BLUE, 7).pack(
-                        side="right")
+        rep = self.runtime.privileges.report() if self.runtime.privileges else None
+        if rep is not None:
+            badge = tk.Frame(parent, bg=bg)
+            badge.pack(fill="x", padx=16, pady=(0, 6))
+            if rep.is_root:
+                label, color = "root", L.ACCENT_GREEN
+            elif rep.allow_root and rep.can_elevate:
+                label, color = "elevated", L.ACCENT_GREEN
+            elif rep.can_elevate:
+                label, color = "available", L.ACCENT_AMBER
             else:
-                self.tk.Frame(card, bg=_GLASS, height=10).pack()
+                label, color = "user only", L.TEXT_FAINT
+            tk.Label(badge, text="PRIVILEGE", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                     font=L.ui_font(8)).pack(anchor="w")
+            tk.Label(badge, text=label, bg=bg, fg=L.to_hex(color),
+                     font=L.ui_font(10, "bold")).pack(anchor="w")
 
-    def _view_security(self, parent: Any) -> None:
-        self._page_title(parent, "Security", "Authorized scope and enforcement posture.")
-        cfg = self.runtime.config
-        scope = self.runtime.pentester.scope
-        card = self._card(parent, expand=False)
-        rows = [
-            ("Authorized hosts",
-             ", ".join(sorted(scope.authorized_hosts)) or "none configured"),
-            ("Always in scope",
-             ", ".join(sorted(local_addresses())) or "loopback only"),
-            ("High-risk auto-approve",
-             "ENABLED — disposable environments only" if cfg.auto_approve_high_risk
-             else "disabled (confirmation required)"),
-            ("Root permitted", "yes" if cfg.allow_root else "no"),
-            ("Write roots", ", ".join(str(p) for p in cfg.write_roots()) or "none"),
-            ("Max retries", str(cfg.max_retries)),
-            ("Killswitch",
-             "ENGAGED" if self.runtime.killswitch.is_engaged() else "armed / ready"),
-        ]
-        for key, val in rows:
-            line = self.tk.Frame(card, bg=_GLASS)
-            line.pack(fill="x", padx=18, pady=4)
-            self.tk.Label(
-                line, text=key, bg=_GLASS, fg=_FG3, width=22, anchor="w",
-                font=self.F(self.f_ui, 9),
-            ).pack(side="left")
-            self.tk.Label(
-                line, text=val, bg=_GLASS, fg=_FG2, anchor="w",
-                font=self.F(self.f_display, 9),
-            ).pack(side="left", fill="x", expand=True)
-
-        self.tk.Frame(card, bg=_GLASS, height=12).pack()
-
-        findings = getattr(self.runtime.pentester, "findings", [])
-        if findings:
-            self._page_title(parent, "Findings", "")
-            for finding in findings:
-                self._section(parent, "FINDING", [(str(finding), _AMBER)])
-
-    def _view_logs(self, parent: Any) -> None:
-        self._page_title(parent, "Audit", "Append-only record of every operation.")
-        card = self._card(parent)
-        entries = self.runtime.log.read(limit=200)
-        if not entries:
-            self._empty(card, "No operations recorded yet.")
-            return
-        for entry in reversed(entries):
-            row = self.tk.Frame(card, bg=_GLASS)
-            row.pack(fill="x", padx=16, pady=2)
-            state = str(entry.get("state", ""))
-            color = _GREEN if state in {"ok", "complete"} else (
-                _RED if state in {"error", "failed"} else _FG3
-            )
-            self.tk.Label(
-                row, text="●", bg=_GLASS, fg=color,
-                font=self.F(self.f_display, 8),
-            ).pack(side="left", padx=(0, 8))
-            self.tk.Label(
-                row,
-                text=time.strftime("%H:%M:%S", time.localtime(entry.get("ts", 0))),
-                bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 8),
-            ).pack(side="left", padx=(0, 10))
-            self.tk.Label(
-                row, text=str(entry.get("agent", "")), bg=_GLASS, fg=_BLUE,
-                font=self.F(self.f_display, 8), width=10, anchor="w",
-            ).pack(side="left")
-            cmd = str(entry.get("command", entry.get("action", "")))
-            self.tk.Label(
-                row, text=cmd[:90], bg=_GLASS, fg=_FG2, anchor="w",
-                font=self.F(self.f_mono, 8),
-            ).pack(side="left", fill="x", expand=True)
-        self.tk.Frame(card, bg=_GLASS, height=12).pack()
-
-    def _view_settings(self, parent: Any) -> None:
-        self._page_title(parent, "Settings", "Effective configuration for this runtime.")
-        cfg = self.runtime.config
-        card = self._card(parent, expand=False)
-        rows = {
-            "home": str(cfg.home),
-            "config file": str(cfg.home / "config.toml"),
-            "log level": cfg.log_level,
-            "command timeout": f"{cfg.command_timeout}s",
-            "api": f"{cfg.api_host}:{cfg.api_port}",
-            "model provider": cfg.model_provider or "none (deterministic core)",
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-        }
-        for key, val in rows.items():
-            line = self.tk.Frame(card, bg=_GLASS)
-            line.pack(fill="x", padx=18, pady=4)
-            self.tk.Label(
-                line, text=key, bg=_GLASS, fg=_FG3, width=18, anchor="w",
-                font=self.F(self.f_ui, 9),
-            ).pack(side="left")
-            self.tk.Label(
-                line, text=str(val), bg=_GLASS, fg=_FG2, anchor="w",
-                font=self.F(self.f_display, 9),
-            ).pack(side="left", fill="x", expand=True)
-        self.tk.Frame(card, bg=_GLASS, height=12).pack()
-
-    # -- shared widgets ------------------------------------------------------
-    def _page_title(self, parent: Any, title: str, subtitle: str) -> None:
-        wrap = self.tk.Frame(parent, bg=_BASE)
-        wrap.pack(fill="x", pady=(16, 4))
-        self.tk.Label(
-            wrap, text=title, bg=_BASE, fg=_FG,
-            font=self.F(self.f_ui, 17, "bold"),
-        ).pack(anchor="w")
-        if subtitle:
-            self.tk.Label(
-                wrap, text=subtitle, bg=_BASE, fg=_FG3,
-                font=self.F(self.f_ui, 9),
-            ).pack(anchor="w", pady=(2, 0))
-
-    def _card(self, parent: Any, expand: bool = True) -> Any:
-        outer = self.tk.Frame(parent, bg=_GLASS, highlightthickness=1,
-                              highlightbackground=_HAIR)
-        outer.pack(fill="both" if expand else "x", expand=expand, pady=(8, 0))
-        # 1px lit top edge — the detail that reads as a glass bevel.
-        self.tk.Frame(outer, bg=_HAIR_HI, height=1).pack(fill="x")
-        return outer
-
-    def _empty(self, parent: Any, text: str) -> None:
-        self.tk.Label(
-            parent, text=text, bg=_GLASS, fg=_FG3,
-            font=self.F(self.f_ui, 10),
-        ).pack(anchor="w", padx=18, pady=18)
-
-    def _pill(self, parent: Any, text: str, color: str, size: int,
-              bold: bool = False, bg: Optional[str] = None) -> Any:
-        bg = bg or _blend(color, _BASE, 0.14)
-        return self.tk.Label(
-            parent, text=text, bg=bg, fg=color,
-            font=self.F(self.f_display, size, "bold" if bold else "normal"),
-            padx=4, pady=2,
+        self.kill_btn = tk.Label(
+            parent, text="  Engage killswitch", anchor="w", cursor="hand2",
+            bg=bg, fg=L.to_hex(L.ACCENT_RED), font=L.ui_font(10, "bold"),
+            padx=10, pady=8,
         )
+        self.kill_btn.pack(fill="x", padx=10, pady=(0, 16))
+        self.kill_btn.bind("<Button-1>", lambda _e: self._toggle_kill())
 
-    def _round_rect(self, canvas: Any, x1, y1, x2, y2, r, **kw) -> None:
-        pts = [
-            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-        ]
-        canvas.create_polygon(pts, smooth=True, **kw)
+    def _paint_nav(self) -> None:
+        for key, btn in self._nav_buttons.items():
+            active = key == self._view
+            btn.configure(
+                fg=L.to_hex(L.ACCENT if active else L.TEXT_DIM),
+                bg=L.to_hex(L.blend(L.SURFACE_HIGH, L.ACCENT, 0.10)) if active
+                else btn.master.cget("bg"),
+            )
 
-    def _bind_wrap(self, label: Any, container: Any, pad: int) -> None:
-        if container is None:
-            return
+    # -- center --------------------------------------------------------- #
+    def _build_center(self, parent) -> None:
+        tk = self.tk
+        bg = parent.cget("bg")
 
-        def _on_resize(event: Any) -> None:
-            label.configure(wraplength=max(event.width - pad, 120))
+        head = tk.Frame(parent, bg=bg)
+        head.pack(fill="x", padx=20, pady=(16, 8))
+        self.view_title = tk.Label(head, text="Thread", bg=bg, fg=L.to_hex(L.TEXT),
+                                   font=L.ui_font(14, "bold"))
+        self.view_title.pack(side="left")
+        self.view_sub = tk.Label(head, text="", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                                 font=L.ui_font(9))
+        self.view_sub.pack(side="left", padx=(12, 0))
+        self.mode_chip = tk.Label(head, text="", bg=bg, fg=L.to_hex(L.TEXT_DIM),
+                                  font=L.ui_font(9, "bold"))
+        self.mode_chip.pack(side="right")
 
-        container.bind("<Configure>", _on_resize, add="+")
+        wrap = tk.Frame(parent, bg=bg)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-    # -- scrolling -----------------------------------------------------------
-    def _scrollframe(self, parent: Any):
-        canvas = self.tk.Canvas(parent, bg=_BASE, highlightthickness=0, bd=0)
-        vbar = self.tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = self.tk.Frame(canvas, bg=_BASE)
-        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        style = L.scrolled_text_style()
+        self.thread = tk.Text(wrap, font=L.ui_font(11), **style)
+        scroll = tk.Scrollbar(
+            wrap, command=self.thread.yview, width=10, bd=0, highlightthickness=0,
+            troughcolor=bg, bg=L.to_hex(L.SURFACE_HIGH),
+            activebackground=L.to_hex(L.BORDER),
+        )
+        self.thread.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.thread.pack(side="left", fill="both", expand=True)
+        self._configure_tags()
 
-        canvas.configure(yscrollcommand=vbar.set)
-        vbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        self._build_composer(parent)
 
-        def _resize(_e: Any) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfigure(win, width=canvas.winfo_width())
+    def _configure_tags(self) -> None:
+        t = self.thread
+        t.tag_configure("user_label", foreground=L.to_hex(L.ACCENT),
+                        font=L.ui_font(9, "bold"), spacing1=10)
+        t.tag_configure("user", foreground=L.to_hex(L.TEXT), font=L.ui_font(11),
+                        lmargin1=2, lmargin2=2, spacing3=6)
+        t.tag_configure("agent_label", foreground=L.to_hex(L.ACCENT_GREEN),
+                        font=L.ui_font(9, "bold"), spacing1=14)
+        t.tag_configure("body", foreground=L.to_hex(L.TEXT), font=L.ui_font(11),
+                        lmargin1=2, lmargin2=2, spacing3=4)
+        t.tag_configure("dim", foreground=L.to_hex(L.TEXT_DIM), font=L.ui_font(10))
+        t.tag_configure("faint", foreground=L.to_hex(L.TEXT_FAINT), font=L.ui_font(9))
+        t.tag_configure("ok", foreground=L.to_hex(L.ACCENT_GREEN), font=L.mono_font(10))
+        t.tag_configure("bad", foreground=L.to_hex(L.ACCENT_RED), font=L.mono_font(10))
+        t.tag_configure("warn", foreground=L.to_hex(L.ACCENT_AMBER), font=L.mono_font(10))
+        t.tag_configure("mono", foreground=L.to_hex(L.TEXT_DIM), font=L.mono_font(10),
+                        lmargin1=14, lmargin2=14, spacing1=2)
+        t.tag_configure("cmd", foreground=L.to_hex(L.ACCENT), font=L.mono_font(10),
+                        lmargin1=16, lmargin2=16, spacing1=4, spacing3=2)
+        t.tag_configure("h", foreground=L.to_hex(L.TEXT), font=L.ui_font(12, "bold"),
+                        spacing1=8, spacing3=4)
+        t.tag_configure("rule", foreground=L.to_hex(L.BORDER), font=L.mono_font(6),
+                        spacing1=6, spacing3=6)
 
-        inner.bind("<Configure>", _resize)
-        canvas.bind("<Configure>", _resize)
+    def _build_composer(self, parent) -> None:
+        tk = self.tk
+        self.composer = tk.Frame(parent, bg=parent.cget("bg"))
+        self.composer.pack(fill="x", padx=12, pady=(0, 14))
 
-        def _wheel(event: Any) -> None:
-            canvas.yview_scroll(int(-event.delta / 40), "units")
+        box_bg = L.to_hex(L.blend(L.BACKGROUND_TOP, L.SURFACE, 0.72))
+        box = tk.Frame(self.composer, bg=box_bg, highlightthickness=1,
+                       highlightbackground=L.to_hex(L.BORDER),
+                       highlightcolor=L.to_hex(L.ACCENT))
+        box.pack(fill="x")
+        inner = tk.Frame(box, bg=box_bg)
+        inner.pack(fill="x", padx=2, pady=2)
 
-        canvas.bind_all("<MouseWheel>", _wheel)
-        canvas.bind_all("<Button-4>", lambda _e: canvas.yview_scroll(-2, "units"))
-        canvas.bind_all("<Button-5>", lambda _e: canvas.yview_scroll(2, "units"))
-        return canvas, inner
+        self.entry = tk.Text(
+            inner, height=3, font=L.ui_font(11), bg=box_bg, fg=L.to_hex(L.TEXT),
+            insertbackground=L.to_hex(L.ACCENT), relief="flat", bd=0,
+            highlightthickness=0, wrap="word", padx=12, pady=10,
+        )
+        self.entry.pack(fill="x")
+        self.entry.bind("<Control-Return>", self._on_ctrl_return)
+        self.entry.bind("<Return>", self._on_return)
 
-    def _scroll_bottom(self) -> None:
-        if self._thread_win is not None:
-            self._thread_win.update_idletasks()
-            self._thread_win.yview_moveto(1.0)
+        foot = tk.Frame(inner, bg=box_bg)
+        foot.pack(fill="x", padx=10, pady=(0, 8))
+        self.hint = tk.Label(foot, text="Enter to send  ·  Shift+Enter for newline",
+                             bg=box_bg, fg=L.to_hex(L.TEXT_FAINT), font=L.ui_font(8))
+        self.hint.pack(side="left")
+        self.send_btn = tk.Label(
+            foot, text="Send", cursor="hand2", padx=14, pady=4,
+            bg=L.to_hex(L.blend(L.SURFACE, L.ACCENT, 0.22)), fg=L.to_hex(L.TEXT),
+            font=L.ui_font(9, "bold"),
+        )
+        self.send_btn.pack(side="right")
+        self.send_btn.bind("<Button-1>", lambda _e: self._submit())
 
-    # -- interaction ---------------------------------------------------------
-    def _on_return(self, _event: Any) -> str:
+    def _on_return(self, event):
+        if event.state & 0x0001:  # Shift held
+            return None
         self._submit()
         return "break"
 
+    def _on_ctrl_return(self, _event):
+        self._submit()
+        return "break"
+
+    # -- right rail ------------------------------------------------------ #
+    def _build_side(self, parent) -> None:
+        tk = self.tk
+        bg = parent.cget("bg")
+        tk.Label(parent, text="AGENTS", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                 font=L.ui_font(8, "bold")).pack(anchor="w", padx=16, pady=(18, 8))
+
+        for name in ("leader", "builder", "pentester", "executor"):
+            card = tk.Frame(parent, bg=bg)
+            card.pack(fill="x", padx=12, pady=3)
+            dot = tk.Canvas(card, width=12, height=12, highlightthickness=0, bd=0, bg=bg)
+            dot.pack(side="left", pady=(4, 0))
+            body = tk.Frame(card, bg=bg)
+            body.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            tk.Label(body, text=name.upper(), bg=bg, fg=L.to_hex(L.TEXT),
+                     font=L.ui_font(10, "bold")).pack(anchor="w")
+            state = tk.Label(body, text="idle", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                             font=L.ui_font(9))
+            state.pack(anchor="w")
+            meta = tk.Label(body, text="", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                            font=L.mono_font(8))
+            meta.pack(anchor="w")
+            self._agent_rows[name] = {"dot": dot, "state": state, "meta": meta}
+
+        tk.Frame(parent, bg=L.to_hex(L.BORDER), height=1).pack(fill="x", padx=16, pady=14)
+
+        tk.Label(parent, text="SYSTEM", bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                 font=L.ui_font(8, "bold")).pack(anchor="w", padx=16, pady=(0, 8))
+        self.sys_labels: Dict[str, Any] = {}
+        for key in ("model", "turns", "scope", "audit", "queue"):
+            row = tk.Frame(parent, bg=bg)
+            row.pack(fill="x", padx=16, pady=2)
+            tk.Label(row, text=key, bg=bg, fg=L.to_hex(L.TEXT_FAINT),
+                     font=L.ui_font(9), width=7, anchor="w").pack(side="left")
+            val = tk.Label(row, text="-", bg=bg, fg=L.to_hex(L.TEXT_DIM),
+                           font=L.ui_font(9), anchor="w")
+            val.pack(side="left", fill="x", expand=True)
+            self.sys_labels[key] = val
+
+    # ------------------------------------------------------------------ #
+    # views
+    # ------------------------------------------------------------------ #
+    def _show(self, view: str) -> None:
+        self._view = view
+        self._paint_nav()
+        for key, label, sub in _VIEWS:
+            if key == view:
+                self.view_title.configure(text=label)
+                self.view_sub.configure(text=sub)
+                break
+        self._render_view()
+
+    def _render_view(self) -> None:
+        {
+            "thread": self._render_thread,
+            "team": self._render_team,
+            "tasks": self._render_tasks,
+            "security": self._render_security,
+            "audit": self._render_audit,
+            "settings": self._render_settings,
+        }.get(self._view, self._render_thread)()
+        self._refresh_system()
+
+    def _clear(self) -> None:
+        self.thread.configure(state="normal")
+        self.thread.delete("1.0", "end")
+
+    def _w(self, text: str, tag: str = "") -> None:
+        self.thread.insert("end", text, tag or ())
+
+    def _render_thread(self) -> None:
+        self.composer.pack(fill="x", padx=12, pady=(0, 14))
+        self._clear()
+        if not self._turns:
+            self._write_welcome()
+        else:
+            for turn in self._turns:
+                self._write_turn(turn)
+        self.thread.configure(state="disabled")
+        self.thread.see("end")
+
+    def _write_welcome(self) -> None:
+        self._w("KALI-AEGIS\n", "h")
+        self._w("Security engineering assistant. Ask for something on this "
+                "machine and the team will work on it with real tools.\n\n", "dim")
+
+        self._w("Capabilities\n", "h")
+        for line in (
+            "  ·  run shell commands, build, and test  (risk-classified, audited)",
+            "  ·  read and write files anywhere the policy allows",
+            "  ·  scoped reconnaissance of authorized targets",
+            "  ·  root/elevated execution when the operator enables it",
+        ):
+            self._w(line + "\n", "body")
+
+        rep = self.runtime.privileges.report() if self.runtime.privileges else None
+        if rep is not None and rep.can_elevate:
+            self._w("\nRoot is available on this host. Start with --root to let "
+                    "privileged commands run; each one is stamped elevated in the "
+                    "audit log.\n", "warn")
+
+        if not self.runtime.llm_available:
+            self._w("\nNo model is configured, so objectives fall back to the "
+                    "deterministic runner. Set KALI_AEGIS_MODEL_PROVIDER and "
+                    "KALI_AEGIS_MODEL_NAME, then export the API key named by "
+                    "KALI_AEGIS_MODEL_API_KEY_ENV (default KALI_AEGIS_MODEL_API_KEY) "
+                    "to enable the reasoning loop.\n", "warn")
+
+        self._w("\nTry\n", "h")
+        for s in ("show me disk usage and the biggest directories under /",
+                  "is sshd listening, and what version is it?",
+                  "write a python script that lists open TCP ports, then run it"):
+            self._w(f"  › {s}\n", "mono")
+
+    def _write_turn(self, turn: Dict[str, Any]) -> None:
+        if turn["kind"] == "user":
+            self._w("YOU\n", "user_label")
+            self._w(turn["text"] + "\n", "user")
+            return
+
+        status = turn.get("status", "")
+        color = {"COMPLETE": "ok", "BLOCKED": "warn", "FAILED": "bad",
+                 "INTERRUPTED": "bad"}.get(status, "dim")
+        self._w(f"AEGIS  ·  {turn.get('mode', '')}\n", "agent_label")
+        self._w("─" * 68 + "\n", "rule")
+
+        for step in turn.get("steps", []):
+            self._write_step(step)
+
+        if turn.get("text"):
+            self._w("\n" + turn["text"] + "\n", "body")
+
+        if turn.get("errors"):
+            self._w("\nErrors\n", "h")
+            for err in turn["errors"]:
+                self._w(f"  · {err}\n", "bad")
+
+        self._w(f"\nSTATUS: {status}\n", color)
+        if turn.get("next"):
+            self._w(f"NEXT: {turn['next']}\n", "dim")
+
+    def _write_step(self, step: Dict[str, Any]) -> None:
+        tool = step.get("tool", "")
+        ok = step.get("ok", True)
+        detail = step.get("detail", "")
+        args = step.get("arguments", {})
+
+        if tool == "run_command":
+            shown = args.get("executed") or args.get("command", "")
+            self._w("  $ ", "faint")
+            self._w(str(shown), "cmd")
+            if args.get("elevated"):
+                self._w("  [elevated]", "warn")
+            self._w("\n", "cmd")
+        elif tool in {"read_file", "write_file", "list_dir"}:
+            self._w(f"  {tool} ", "faint")
+            self._w(str(args.get("path", "")), "mono")
+            self._w("\n", "mono")
+
+        output = (step.get("output") or "").strip()
+        if output:
+            lines = output.splitlines()
+            shown = lines[:12]
+            for line in shown:
+                self._w("      " + line[:160] + "\n", "mono")
+            if len(lines) > len(shown):
+                self._w(f"      … {len(lines) - len(shown)} more lines\n", "faint")
+        elif detail and not ok:
+            self._w(f"      {detail[:200]}\n", "bad")
+
+    def _render_team(self) -> None:
+        self.composer.pack_forget()
+        self._clear()
+        self._w("The team, and what each actually is\n", "h")
+        self._w("A self-model is not a prompt — it is the class's real public "
+                "methods, checked against a declared capability list.\n", "dim")
+        for agent in self.runtime.agents.values():
+            model = agent.introspect()
+            self._w(f"\n{model.name.upper()}  ·  {model.role}\n", "h")
+            state = model.status
+            self._w(f"  state        {state}\n",
+                    "bad" if state in {"ERROR", "STOPPED"} else "ok")
+            self._w(f"  requires llm {'yes' if model.requires_llm else 'no'}\n", "faint")
+            self._w("  capabilities\n", "dim")
+            for cap in model.capabilities:
+                self._w(f"    · {cap}\n", "body")
+            if model.limitations:
+                self._w("  limits\n", "dim")
+                for lim in model.limitations:
+                    self._w(f"    · {lim}\n", "faint")
+        self.thread.configure(state="disabled")
+
+    def _render_tasks(self) -> None:
+        self.composer.pack_forget()
+        self._clear()
+        tasks = self.runtime.state.all()
+        self._w("Objectives\n", "h")
+        if not tasks:
+            self._w("No objectives yet. Ask for something in the Thread.\n", "dim")
+        for task in tasks:
+            color = {"COMPLETE": "ok", "BLOCKED": "warn", "FAILED": "bad",
+                     "INTERRUPTED": "bad", "RUNNING": "mono"}.get(task.status, "dim")
+            self._w(f"\n{task.id}  {task.objective}\n", "h")
+            self._w(f"  status   {task.status}\n", color)
+            if task.scope:
+                self._w(f"  scope    {task.scope}\n", "faint")
+            for sub in task.subtasks:
+                mark = "✓" if sub.status == "COMPLETE" else "·"
+                self._w(f"    {mark} [{sub.agent}] {sub.description}\n", "body")
+        self.thread.configure(state="disabled")
+
+    def _render_security(self) -> None:
+        self.composer.pack_forget()
+        self._clear()
+        scope = self.runtime.pentester.scope
+        rep = self.runtime.privileges.report() if self.runtime.privileges else None
+
+        self._w("Authorized scope\n", "h")
+        hosts = sorted(scope.authorized_hosts)
+        if hosts:
+            for host in hosts:
+                self._w(f"  · {host}\n", "ok")
+        else:
+            self._w("  (none configured) — reconnaissance is limited to localhost\n", "warn")
+
+        self._w("\nAlways permitted (this machine)\n", "h")
+        for addr in sorted(local_addresses()):
+            self._w(f"  · {addr}\n", "dim")
+
+        self._w("\nPosture\n", "h")
+        self._w(f"  high-risk auto-approve   "
+                f"{'ON' if self.config.auto_approve_high_risk else 'off'}\n",
+                "bad" if self.config.auto_approve_high_risk else "body")
+        self._w(f"  killswitch               "
+                f"{'ENGAGED' if self.runtime.killswitch.is_engaged() else 'released'}\n",
+                "bad" if self.runtime.killswitch.is_engaged() else "ok")
+        if rep is not None:
+            self._w(f"  allow root               "
+                    f"{'enabled' if rep.allow_root else 'disabled'}\n",
+                    "warn" if rep.allow_root else "body")
+            self._w(f"  elevation                {rep.capability}\n", "dim")
+
+        self._w("\nBoundary\n", "h")
+        self._w("Root administers this machine. It is not authorization to test "
+                "third-party systems. Remote security work needs an explicit scope "
+                "above.\n", "dim")
+        self.thread.configure(state="disabled")
+
+    def _render_audit(self) -> None:
+        self.composer.pack_forget()
+        self._clear()
+        self._w("Operation log  (append-only, secrets redacted)\n", "h")
+        entries = list(self.runtime.log.tail(limit=200))
+        if not entries:
+            self._w("Nothing recorded yet.\n", "dim")
+        for entry in reversed(entries):
+            ts = str(entry.get("timestamp", ""))[11:19]
+            status = str(entry.get("status", ""))
+            color = {"ok": "ok", "failed": "bad", "denied": "warn",
+                     "error": "bad"}.get(status, "dim")
+            tag = "[elevated] " if entry.get("elevated") else ""
+            self._w(f"{ts}  ", "faint")
+            self._w(f"{entry.get('agent', ''):<9}", "faint")
+            self._w(f"{entry.get('operation', ''):<14}", "dim")
+            self._w(f"{tag}{entry.get('command') or entry.get('target') or ''}\n", color)
+        self.thread.configure(state="disabled")
+
+    def _render_settings(self) -> None:
+        self.composer.pack_forget()
+        self._clear()
+        self._w("Effective configuration\n", "h")
+        data = self.config.to_dict()
+        for key in sorted(data):
+            value = data[key]
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value) or "(empty)"
+            self._w(f"  {key:<26} {value}\n", "body")
+        self._w("\nPrivilege\n", "h")
+        for line in (self.runtime.privileges.describe() if self.runtime.privileges else []):
+            self._w(f"  {line}\n", "dim")
+        if self.runtime.ai is not None:
+            self._w(f"\n  llm endpoint              {self.runtime.ai.client.endpoint}\n", "dim")
+            self._w(f"  llm available             "
+                    f"{'yes' if self.runtime.llm_available else 'no'}\n",
+                    "ok" if self.runtime.llm_available else "warn")
+        self.thread.configure(state="disabled")
+
+    # ------------------------------------------------------------------ #
+    # submitting an objective
+    # ------------------------------------------------------------------ #
     def _submit(self) -> None:
         if self._busy:
             return
-        entry = self._entry
-        if entry is None or not entry.winfo_exists():
+        if not getattr(self.entry, "winfo_exists", lambda: False)():
             return
-        text = entry.get("1.0", "end").strip()
-        if not text:
+        objective = self.entry.get("1.0", "end").strip()
+        if not objective:
             return
-        entry.delete("1.0", "end")
-        self._turns.append({"kind": "user", "text": text})
-        self._turns.append({"kind": "assistant", "text": "", "pending": True})
-        self._view = "thread"
-        self._render_view()
-        self._scroll_bottom()
+        if self.runtime.killswitch.is_engaged():
+            self._flash("killswitch is engaged — release it first")
+            return
 
+        self.entry.delete("1.0", "end")
+        self._turns.append({"kind": "user", "text": objective})
         self._busy = True
-        self._set_status("● WORKING", _BLUE)
-        self._show_activity("leader", "planning the objective")
-        threading.Thread(target=self._run_objective, args=(text,),
-                         daemon=True).start()
+        self._set_busy(True)
+        self._render_thread()
+
+        threading.Thread(
+            target=self._run_objective, args=(objective,), daemon=True
+        ).start()
 
     def _run_objective(self, objective: str) -> None:
-        """Worker thread: run the objective and hand the result to the UI queue.
-
-        Tkinter is not thread-safe, so nothing here touches a widget — the main
-        loop picks the result up in :meth:`_drain_results`.
-        """
+        """Worker thread. Never touches a widget — results go through the queue."""
         try:
-            report = self.runtime.run_task(objective)
+            self._results.put(("report", self.runtime.act(objective)))
         except Exception as exc:  # pragma: no cover - defensive
-            self._results.put((None, str(exc)))
-        else:
-            self._results.put((report, None))
+            self._results.put(("error", exc))
 
-    def _drain_results(self) -> None:
+    def _set_busy(self, busy: bool) -> None:
+        try:
+            if busy:
+                self.send_btn.configure(
+                    text="…", bg=L.to_hex(L.blend(L.SURFACE, L.TEXT_FAINT, 0.2)))
+                self.hint.configure(
+                    text="working — the team is executing actions",
+                    fg=L.to_hex(L.TEXT_DIM))
+            else:
+                self.send_btn.configure(
+                    text="Send", bg=L.to_hex(L.blend(L.SURFACE, L.ACCENT, 0.22)))
+                self.hint.configure(
+                    text="Enter to send  ·  Shift+Enter for newline",
+                    fg=L.to_hex(L.TEXT_FAINT))
+        except Exception:  # pragma: no cover - widget gone
+            pass
+
+    def _flash(self, message: str) -> None:
+        self.hint.configure(text=message, fg=L.to_hex(L.ACCENT_RED))
+        self.root.after(2500, lambda: self.hint.configure(
+            text="Enter to send  ·  Shift+Enter for newline",
+            fg=L.to_hex(L.TEXT_FAINT)))
+
+    # ------------------------------------------------------------------ #
+    # main loop
+    # ------------------------------------------------------------------ #
+    def _tick(self) -> None:
+        if not self._alive():
+            return
         while True:
             try:
-                report, error = self._results.get_nowait()
+                kind, payload = self._results.get_nowait()
             except queue.Empty:
-                return
-            self._finish_turn(report, error)
+                break
+            if kind == "report":
+                self._turns.append(self._report_to_turn(payload))
+            else:
+                self._turns.append({
+                    "kind": "assistant",
+                    "text": f"the run failed: {payload}",
+                    "status": "FAILED", "mode": "error", "steps": [],
+                    "errors": [str(payload)], "next": "review the failure and retry",
+                })
+            self._busy = False
+            self._set_busy(False)
+            if self._view == "thread":
+                self._render_thread()
 
-    def _finish_turn(self, report: Optional[Dict[str, Any]],
-                     error: Optional[str]) -> None:
-        self._busy = False
-        self._clear_activity()
-        if self._turns and self._turns[-1].get("pending"):
-            self._turns.pop()
-        if report is not None:
-            status = report.get("STATUS", "")
-            self._turns.append({
-                "kind": "assistant", "status": status, "report": report,
-            })
-            self._set_status("● " + status, _STATUS_COLOR.get(status, _FG3))
-        else:
-            self._turns.append({
-                "kind": "assistant", "text": f"Runtime error: {error}",
-            })
-            self._set_status("● ERROR", _RED)
-        self._render_view()
-        self._scroll_bottom()
+        self._refresh_agents()
+        if self._view == "thread" and not self._busy:
+            self._refresh_system()
+        self._animate()
+        self._after_id = self.root.after(90, self._tick)
 
+    def _alive(self) -> bool:
+        """Whether the window still exists; the tick loop outlives teardown."""
+        try:
+            return bool(self.root.winfo_exists())
+        except Exception:  # pragma: no cover - interpreter gone
+            return False
+
+    def close(self) -> None:
+        """Cancel the pending tick before destroying, so no callback fires late."""
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except Exception:  # pragma: no cover
+                pass
+            self._after_id = None
+        try:
+            self.root.destroy()
+        except Exception:  # pragma: no cover
+            pass
+
+    @staticmethod
+    def _report_to_turn(report: Dict[str, Any]) -> Dict[str, Any]:
+        results = report.get("RESULTS") or []
+        text = results[0] if results else ""
+        if not text:
+            text = "\n".join(report.get("ACTIONS", [])[:8])
+        return {
+            "kind": "assistant",
+            "text": text,
+            "status": report.get("STATUS", "UNKNOWN"),
+            "mode": report.get("MODE", ""),
+            "steps": report.get("STEPS", []),
+            "errors": report.get("ERRORS", []),
+            "next": report.get("NEXT ACTION", ""),
+        }
+
+    def _animate(self) -> None:
+        self.liquid.step()
+        self._phase = (self._phase + 0.0035) % 1.0
+        self.canvas.delete("sweep")
+        L.specular_sweep(
+            self.canvas, self.RAIL_W + 28, 0,
+            self.canvas.winfo_width() or self.WIDTH, 150,
+            self._phase, tags=("sweep",),
+        )
+
+    def _refresh_agents(self) -> None:
+        try:
+            monitor = self.runtime.monitor()
+        except Exception:  # pragma: no cover - defensive
+            return
+        by_name = {a["name"]: a for a in monitor.get("agents", [])}
+        for name, row in self._agent_rows.items():
+            info = by_name.get(name, {})
+            state_name = info.get("state", "IDLE")
+            color = L.to_hex(_STATE_COLOR.get(state_name, L.TEXT_FAINT))
+            row["state"].configure(text=state_name.lower(), fg=color)
+            row["dot"].delete("all")
+            row["dot"].create_oval(3, 3, 9, 9, fill=color, outline="")
+            elapsed = info.get("elapsed_s") or 0
+            task = (info.get("current_task") or "")[:20]
+            row["meta"].configure(text=f"{elapsed:5.1f}s {task}")
+
+    def _refresh_system(self) -> None:
+        available = self.runtime.llm_available
+        self.sys_labels["model"].configure(
+            text=self.config.model_name if available else "none",
+            fg=L.to_hex(L.ACCENT_GREEN if available else L.TEXT_FAINT))
+        self.mode_chip.configure(
+            text="AI REASONING" if available else "DETERMINISTIC",
+            fg=L.to_hex(L.ACCENT_GREEN if available else L.TEXT_FAINT))
+        try:
+            entries = list(self.runtime.log.tail(limit=1))
+            last = entries[-1] if entries else {}
+            self.sys_labels["audit"].configure(text=str(last.get("operation", "-")))
+        except Exception:  # pragma: no cover
+            pass
+        scope = self.runtime.pentester.scope
+        self.sys_labels["scope"].configure(text=f"{len(scope.authorized_hosts)} host(s)")
+        self.sys_labels["queue"].configure(text=str(len(self.runtime.state.queue())))
+        self.sys_labels["turns"].configure(text=str(len(self._turns)))
+
+    # ------------------------------------------------------------------ #
+    # killswitch
+    # ------------------------------------------------------------------ #
     def _toggle_kill(self) -> None:
         if self.runtime.killswitch.is_engaged():
             self._release_kill()
         else:
             self._engage_kill()
 
-    def _set_status(self, text: str, color: str) -> None:
-        self.status_pill.configure(text=text, fg=color,
-                                   bg=_blend(color, _BASE, 0.14))
+    def _engage_kill(self) -> None:
+        self.runtime.killswitch.engage("operator engaged killswitch from the console")
+        self.kill_btn.configure(text="  Release killswitch", fg=L.to_hex(L.ACCENT_GREEN))
+        self._flash("killswitch engaged — new work is refused")
 
-    # -- live refresh --------------------------------------------------------
-    def _refresh_agent_rail(self) -> None:
-        monitor = self.runtime.monitor()
-        self.team_count.configure(text=str(len(monitor["agents"])))
-        self.queue_lbl.configure(text=f"queue {monitor['queue_length']}")
-        errors = sum(a.get("error_count", 0) for a in monitor["agents"])
-        self.err_lbl.configure(text=f"errors {errors}")
+    def _release_kill(self) -> None:
+        self.runtime.killswitch.release()
+        if self.runtime.killswitch.env_engaged():
+            self._flash("sentinel removed, but KALI_AEGIS_KILLSWITCH is set in the environment")
+        else:
+            self.kill_btn.configure(text="  Engage killswitch", fg=L.to_hex(L.ACCENT_RED))
+            self._flash("killswitch released")
 
-        for child in self.team_body.winfo_children():
-            child.destroy()
-        for agent in monitor["agents"]:
-            row = self.tk.Frame(self.team_body, bg=_GLASS)
-            row.pack(fill="x", pady=3, padx=4)
-            state = agent.get("state", "IDLE")
-            color = _STATE_COLOR.get(state, _FG3)
-            self.tk.Label(row, text="●", bg=_GLASS, fg=color,
-                          font=self.F(self.f_display, 9)).pack(
-                side="left", padx=(0, 8))
-            box = self.tk.Frame(row, bg=_GLASS)
-            box.pack(side="left", fill="x", expand=True)
-            self.tk.Label(
-                box, text=agent["name"], bg=_GLASS, fg=_FG,
-                font=self.F(self.f_ui, 9, "bold"),
-            ).pack(anchor="w")
-            detail = agent.get("current_task") or agent.get("last_action") or state.lower()
-            self.tk.Label(
-                box, text=str(detail)[:28], bg=_GLASS, fg=_FG3,
-                font=self.F(self.f_ui, 8),
-            ).pack(anchor="w")
-            self.tk.Label(
-                row, text=str(round(agent.get("elapsed_s", 0))) + "s",
-                bg=_GLASS, fg=_FG3, font=self.F(self.f_display, 8),
-            ).pack(side="right")
-            self._agent_rows[agent["name"]] = row
-
-        engaged = monitor["killswitch"]
-        if engaged != self._kill_cache:
-            self._kill_cache = engaged
-            if engaged:
-                self.kill_pill.configure(text="KILLSWITCH ENGAGED", fg=_RED,
-                                         bg=_blend(_RED, _BASE, 0.16))
-                self.rail_kill.configure(fg=_RED)
-                self._set_status("● HALTED", _RED)
-            else:
-                self.kill_pill.configure(text="KILLSWITCH ARMED", fg=_FG3,
-                                         bg=_blend(_FG3, _BASE, 0.14))
-                self.rail_kill.configure(fg=_GREEN)
-                if not self._busy:
-                    self._set_status("● READY", _GREEN)
-
-        self.hint.configure(
-            text=f"{len(self.runtime.state.all())} tasks · "
-                 f"{len(self.runtime.messages())} messages · "
-                 f"home {self.runtime.config.home}"
-        )
-
-    def _tick(self) -> None:
-        self._spin = (self._spin + 1) % len(_SPINNER)
-        if self._activity is not None and self._spin_lbl is not None:
-            try:
-                self._spin_lbl.configure(text=_SPINNER[self._spin])
-            except Exception:  # pragma: no cover - widget race
-                pass
-        try:
-            self._drain_results()
-            self._refresh_agent_rail()
-        except Exception:  # pragma: no cover - defensive
-            pass
-        self.root.after(250, self._tick)
+    # ------------------------------------------------------------------ #
+    # entry point
+    # ------------------------------------------------------------------ #
+    def run(self) -> None:
+        self.root.mainloop()
 
 
-def launch(config: Config) -> int:
-    """Start the desktop console. Returns a process exit code."""
+def launch(config: Config, runtime: Optional[Runtime] = None) -> int:
+    """Start the console. Returns a process exit code."""
     try:
-        import tkinter  # noqa: F401
-    except ImportError as exc:
+        import tkinter as tk  # local import: only needed for the GUI
+    except ImportError:
         print(_TK_HELP, file=sys.stderr)
-        print(f"\nunderlying error: {exc}", file=sys.stderr)
         return 1
+    del tk  # presence is all this check needs
 
-    runtime = Runtime.build(config)
-    app = GlassApp(runtime)
-    app.root.mainloop()
+    rt = runtime or Runtime.build(config, interactive=False)
+    try:
+        app = GlassApp(rt, config)
+    except Exception as exc:  # pragma: no cover - no display
+        print(f"cannot open a window: {exc}", file=sys.stderr)
+        print("If you are on a headless machine, run the CLI instead.", file=sys.stderr)
+        return 1
+    app.run()
     return 0
