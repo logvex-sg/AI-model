@@ -1,311 +1,97 @@
-# KALI-AEGIS
+# JARVIS
 
-An autonomous security and software engineering platform for systems, networks,
-and repositories you own or are explicitly authorized to test. KALI-AEGIS runs
-four cooperating agents — **leader**, **builder**, **pentester**, and
-**executor** — behind a single CLI, a REST API, and a desktop console.
+A local-first Linux assistant. The AI model never touches the OS directly: every action goes
+through a typed tool registry, a permission policy, and an audited executor.
 
-It is dependency-free: the whole thing runs on the Python standard library, so
-it works on a bare Kali host with no `pip install` step.
-
-## What it actually does
-
-This is a working framework, not a proof of concept. What is implemented today:
-
-| Capability | Status | Notes |
-|---|---|---|
-| Agent team with self-models | Implemented | Each agent declares its real capabilities and limits |
-| Agent runtime state | Implemented | IDLE / THINKING / PLANNING / EXECUTING / ERROR / STOPPED, with live counters |
-| Structured inter-agent messaging | Implemented | Assignments and verification results with status, error, recommended action |
-| Task planning / decomposition | Implemented | Template-based intent routing; no LLM required |
-| **AI reasoning loop** | **Implemented** | Any OpenAI-compatible endpoint; the model calls real tools |
-| Recovery engine | Implemented | Classify → strategise → retry with backoff and an anti-spin guard |
-| Shell execution with audit trail | Implemented | Every command logs command, cwd, exit code, duration, state |
-| Risk policy (LOW/MEDIUM/HIGH) | Implemented | Reversibility, privilege need, and category assessed before execution |
-| **Root / elevated execution** | **Implemented** | Off by default; `--root` enables `sudo`, every use is stamped in the audit log |
-| Killswitch | Implemented | Env var or sentinel file; checked before every action |
-| Persistent task + project state | Implemented | Atomic JSON state under `$KALI_AEGIS_HOME` |
-| Secret redaction | Implemented | Tokens, keys, JWTs, PEM blocks scrubbed from all output |
-| Sandboxed filesystem writes | Implemented | Writes confined to configured roots |
-| Scoped reconnaissance | Implemented | TCP connect scan + banner grab, scope-enforced |
-| Diagnostics table | Implemented | `aegis doctor` reports each component as OK / WARN / MISSING |
-| REST API | Implemented | Stdlib `http.server`, loopback by default |
-| Desktop console | Implemented | Tkinter liquid-glass UI; AI thread, live agent rail, killswitch |
-| Exploitation / payload delivery | **Not implemented** | Deliberately out of scope |
-
-Read the [architecture](docs/ARCHITECTURE.md) for how the pieces fit.
-
-## The important caveat
-
-The reasoning loop is **optional and off by default**. With no model configured,
-KALI-AEGIS falls back to its deterministic core: shell execution, risk
-enforcement, filesystem operations, scoped recon, recovery, and audit logging
-all still work, but a natural-language objective that needs reasoning is
-reported as `STATUS: BLOCKED` with a concrete reason rather than guessed at.
-
-Configure an OpenAI-compatible endpoint and the same objective is pursued for
-real: the model chooses actions, and every action runs through the same risk
-policy, privilege layer, killswitch, and audit trail a CLI command would.
-
-Either way the reporting is honest. An agent that fabricates success is worse
-than one that admits a limit.
+```
+CLI  ->  Agent  ->  Executor  ->  Policy / Killswitch / Behaviour monitor  ->  Tool  ->  Linux
+                        |
+                        +-> Audit log (JSONL, secrets redacted)
+```
 
 ## Install
 
-```bash
-git clone --branch kali-ops-implementation \
-  https://github.com/logvex-sg/AI-model.git
-cd AI-model
-```
-
-For a full walkthrough — requirements, pipx, venv, verification, uninstall, and
-troubleshooting — see the **[install guide](docs/INSTALL.md)**. The short version:
-
-### Just run it (recommended)
-
-No install required at all:
-
-```bash
-python3 -m aegis doctor
-```
-
-Every command below works with `python3 -m aegis <command>`.
-
-### Install the `aegis` command
-
-Kali and Debian block system-wide `pip install` with
-[PEP 668](https://peps.python.org/pep-0668/) (`error: externally-managed-environment`).
-Use one of these instead.
-
-**pipx** (cleanest — isolated, puts the command on your PATH):
-
-```bash
-sudo apt-get install -y pipx
-pipx install .
-aegis doctor
-```
-
-**Virtual environment** (if you want a normal editable install):
+Requires Python 3.10+.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/aegis doctor
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/jarvis doctor
 ```
 
-**Not recommended:** `pip install -e . --break-system-packages`. It can corrupt
-your system Python. The two options above are strictly better.
-
-If you installed with `pip --user` and get `aegis: command not found`, the
-script landed in `~/.local/bin`, which is often not on `PATH`:
+Desktop install (venv in `~/.local/share/jarvis`, `jarvis` on PATH, launcher + icon):
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+./install.sh
 ```
 
-Python 3.9+ is required. The desktop console additionally needs the system Tk
-libraries:
+## Model backend
+
+Ollama is the default and is expected at `http://127.0.0.1:11434`:
 
 ```bash
-sudo apt-get install -y python3-tk      # Kali / Debian / Ubuntu
+ollama serve
+ollama pull llama3.1
 ```
 
-## Quick start
+`jarvis status` / `jarvis doctor` report the backend as unreachable and the model as
+not installed unless the backend actually says otherwise — they never assume.
+
+A remote OpenAI-compatible endpoint can be used instead. The key is read from an environment
+variable (`JARVIS_API_KEY` by default); it is never stored in the repo or in config files.
 
 ```bash
-aegis start                        # banner, health table, readiness
-aegis doctor                       # detailed diagnostics
-aegis agents                       # inspect the team's self-models
-aegis monitor                      # live per-agent state
-aegis exec "uname -a"              # run a command through the audit trail
-aegis plan "create a python tool"  # decompose without executing
-aegis task "create a python tool"  # plan and run
-aegis pentest 127.0.0.1            # scoped recon of an authorized target
-aegis kill                         # engage the killswitch
-aegis resume                       # release it
-aegis gui                          # launch the desktop console
+export JARVIS_PROVIDER=openai_compat
+export JARVIS_ENDPOINT=https://api.example.com/v1
+export JARVIS_MODEL=some-model
+export JARVIS_API_KEY=...
 ```
 
-## AI reasoning engine
-
-KALI-AEGIS speaks the OpenAI chat-completions protocol, so it works with OpenAI,
-DeepSeek, Groq, Together, OpenRouter, xAI, Mistral, or a local Ollama /
-LM Studio / vLLM server. Configure it with environment variables:
+## CLI
 
 ```bash
-export KALI_AEGIS_MODEL_PROVIDER=deepseek       # or openai, groq, ollama, custom…
-export KALI_AEGIS_MODEL_NAME=deepseek-chat
-export KALI_AEGIS_MODEL_API_KEY=sk-...          # Ollama and LM Studio need none
-aegis task "find the largest files under /var and summarise them"
+jarvis status [--json]        # mode, backend reachability, killswitch, monitor
+jarvis doctor                 # environment checks
+jarvis tools                  # registered tools with permission levels
+jarvis run <tool> --args '{}' # run a single tool through the executor
+jarvis chat                   # interactive session (needs a reachable model backend)
+jarvis emergency-stop         # engage the persistent killswitch
+jarvis resume                 # clear it
+jarvis audit [--limit N]      # tail the audit log
+jarvis memory remember|search|forget|clear
 ```
 
-| Variable | Meaning |
-|---|---|
-| `KALI_AEGIS_MODEL_PROVIDER` | `none` (default), `openai`, `deepseek`, `groq`, `together`, `openrouter`, `xai`, `mistral`, `ollama`, `lmstudio`, or `custom` |
-| `KALI_AEGIS_MODEL_BASE_URL` | Override the endpoint; required for `custom` |
-| `KALI_AEGIS_MODEL_NAME` | Model identifier |
-| `KALI_AEGIS_MODEL_API_KEY` | Bearer token (name is configurable via `KALI_AEGIS_MODEL_API_KEY_ENV`) |
-| `KALI_AEGIS_MODEL_TIMEOUT` | Per-request timeout in seconds (default 60) |
-| `KALI_AEGIS_MODEL_MAX_TOKENS` | Response cap (default 2048) |
-| `KALI_AEGIS_MAX_AGENT_ITERATIONS` | Tool-call budget per objective (default 12) |
+State lives in `~/.local/state/jarvis/`: `memory.db`, `audit.jsonl`, `EMERGENCY_STOP`.
+Config is read from `~/.config/jarvis/config.toml` and `JARVIS_*` environment variables.
 
-The model is given four tools — `run_command`, `read_file`, `write_file`,
-`list_dir` — and a `finish` tool. Every call is routed through the existing
-executor, so the risk policy, privilege layer, killswitch, and audit log all
-still apply. The model cannot bypass them; a refused call comes back to it as a
-failed step it has to reason about.
+## Modes and permissions
 
-`aegis doctor` reports the model as `OK` only when provider, endpoint, and key
-are all actually present. A provider name with no key reads as `WARN`, not a
-false `OK`.
+Modes (`normal`, `code`, `beast`, `op`, `override`) set the maximum permission level and the
+tool-call budget per turn. Tools declare their own level (`safe`, `moderate`, `high`,
+`destructive`, `blocked`) — the model cannot choose or raise it.
 
-## Root and elevated execution
+`override` is a configuration mode, **not** a security bypass: destructive operations still
+require explicit confirmation, and this is enforced by a test.
 
-Root is available but **off by default**, and it is a permission to administer
-*this* machine — never authorization to touch third-party systems.
+## Safety
+
+- Filesystem tools confine paths to `$HOME` by default, resolving symlinks first.
+- Writes/copies/moves refuse to clobber existing paths unless `overwrite=true`.
+- Archive extraction rejects `..` traversal and symlink members.
+- Subprocesses run with a fixed argument vector, `shell=False`, and a timeout.
+- Destructive calls require confirmation; without a confirm callback they return
+  `needs_confirmation` instead of running.
+- `emergency-stop` writes a file, so any other JARVIS process is halted too.
+- The behaviour monitor suspends execution on repeated failures, loops, or denial storms.
+- Audit records redact secret-looking values; memory refuses to store them.
+
+## Tests
 
 ```bash
-aegis privilege                    # what can this host actually do?
-aegis --root exec "apt-get update" # allow privileged commands
-aegis --allow-high-risk exec "..." # skip HIGH-risk confirmation (lab only)
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check .
 ```
 
-What happens when root is allowed:
+## Status
 
-- Commands are classified first. Only ones that genuinely need root
-  (`apt`, `systemctl`, `mount`, writes under `/etc`, …) get elevated.
-- Non-interactive callers (the API and the GUI worker) use `sudo -n` and fail
-  fast if passwordless sudo is unavailable, because they cannot prompt.
-  The CLI uses plain `sudo`, which may prompt.
-- The result records `privilege` (`user` / `root` / `elevated`) and an
-  `elevated` flag, and the same fields land in the audit log and the console.
-- With root disabled, a command that needs it raises `PrivilegeDenied`
-  (exit code 9) and is logged as `denied` — it does not run and it does not
-  silently fall back.
-
-Environment equivalents: `KALI_AEGIS_ALLOW_ROOT=1`,
-`KALI_AEGIS_AUTO_APPROVE_HIGH_RISK=1`.
-
-## Desktop console
-
-`aegis gui` opens a conversation-first assistant surface, not an admin table.
-You describe an objective in the composer; the team plans and works on it, and
-the thread shows each step in plain language with raw commands kept inside
-their own monospace cards.
-
-- **Thread** — the main surface. Ask for something, watch the plan and activity
-  stream in, read the result and next action. When a model is configured the
-  objective actually runs; when it is not, the view says so and falls back to
-  the deterministic runner.
-- **Team** — each agent's self-model: what it can do and where it stops.
-- **Tasks / Audit / Security / Settings** — objectives, the append-only
-  operation log, the authorized scope and safety posture, effective config.
-
-A live agent rail sits on the right showing each agent's state, current action,
-and elapsed time; the killswitch is always one click away in the left rail.
-
-The window is drawn with a liquid-glass treatment: an animated background of
-soft drifting light, frosted panels whose fills are blended from what sits
-behind them, a lit hairline along each panel's top edge and a shaded one along
-the bottom, and a slow specular sweep across the hero. It is all built from
-Tkinter canvas primitives — no third-party theme, no widget library, no Pillow.
-
-## Commands
-
-| Command | Purpose |
-|---|---|
-| `start` / `stop` / `restart` | Verify readiness / halt / release and re-verify |
-| `status` | Runtime, agent, and killswitch status |
-| `doctor [--json]` | Component health table |
-| `plan <objective>` | Decompose an objective |
-| `task <objective>` | Plan and execute an objective |
-| `resume-task <id>` | Resume an INTERRUPTED task |
-| `tasks` | List known tasks |
-| `privilege` | Root/elevation capability on this host |
-| `exec <command>` | Execute a shell command |
-| `shell` | Interactive command shell |
-| `agents` / `monitor` | Self-models / live state |
-| `messages` | Structured inter-agent messages |
-| `logs` | Recent audit entries |
-| `pentest <target>` / `network <target>` | Scoped reconnaissance |
-| `security` | Authorized scope and safety posture |
-| `repo init` / `repo status` | Repository helpers |
-| `build` / `test` | Build and test a project |
-| `kill` / `resume` | Killswitch control |
-| `config` | Print effective configuration |
-| `api` / `gui` | Run the REST API / desktop console |
-
-Global flags: `--config PATH`, `--home PATH`, `--dry-run`, `--root`,
-`--allow-high-risk`.
-
-### Exit codes
-
-Command failures are typed, so scripts can tell a policy denial from a crash:
-
-| Code | Meaning |
-|---|---|
-| 1 | General failure |
-| 2 | Configuration error |
-| 3 | Killswitch engaged |
-| 4 | Scope violation |
-| 5 | Risk denied |
-| 6 | Command failed |
-| 7 | Not found |
-| 8 | Recovery exhausted |
-
-## Configuration
-
-Precedence: explicit overrides → environment → config file → defaults.
-
-The config file lives at `$KALI_AEGIS_HOME/config.toml` (default `~/.aegis/`):
-
-```toml
-log_level = "INFO"
-command_timeout = 300
-api_host = "127.0.0.1"
-api_port = 8765
-authorized_hosts = ["lab.internal"]
-allowed_write_paths = ["/srv/work"]
-auto_approve_high_risk = false
-max_retries = 1
-retry_backoff_s = 1.0
-```
-
-Every field can also be set through the environment:
-
-```bash
-export KALI_AEGIS_API_PORT=9000
-export KALI_AEGIS_AUTHORIZED_HOSTS="lab.internal,ctf.local"
-export KALI_AEGIS_AUTO_APPROVE_HIGH_RISK=1   # disposable environments only
-```
-
-## Safety model
-
-Three boundaries are enforced in code, not just documented:
-
-**Risk.** Every command is graded before it runs. `rm -rf /` and friends are
-HIGH risk and refused unless you pass `--confirm-high-risk` or explicitly set
-`auto_approve_high_risk`. Unknown commands default to MEDIUM, never LOW. The
-assessment also records whether the operation is reversible and whether it needs
-root.
-
-**Scope.** Owning the machine KALI-AEGIS runs on does not authorize attacking
-another host. Only loopback, this machine's own addresses, and hosts listed in
-`authorized_hosts` pass the scope check. A bare LAN address such as
-`10.0.0.5` is treated as a *foreign* host — same network, different machine,
-still needs authorization.
-
-**Killswitch.** Engage with `aegis kill`, `KALI_AEGIS_KILLSWITCH=1`, or the
-desktop button. It is checked before every operation and halts new work
-immediately, including between recovery attempts.
-
-## Development
-
-```bash
-python3 -m unittest discover -s tests -t .   # run the suite (74 tests, no deps)
-python3 -m compileall aegis                  # syntax check
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+See [PROJECT_STATE.md](PROJECT_STATE.md) for what is implemented and what is not.
